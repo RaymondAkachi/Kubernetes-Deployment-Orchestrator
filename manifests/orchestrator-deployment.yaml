@@ -1,0 +1,232 @@
+# Need to set up istio in the cluster to before running the istio cofig
+# istioctl install --set profile=demo -y
+# kubectl label namespace default istio-injection=enabled
+---
+# ConfigMap for orchestrator configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator-config
+  namespace: default
+data:
+# Implement the needed tls files possibly using volume mounts
+  config.yaml: |
+    kubernetes:
+      in_cluster: true
+      timeout: 10s
+      rate_limit:
+        qps: 10
+        burst: 20
+      retry_count: 3
+    security:
+      auth:
+        type: k8s_token
+      rate_limit:
+        enabled: true
+        requests_per_second: 10
+        burst: 20
+      tls:
+       enabled: true
+       certfile: var/tls/orchestrator/file.cert
+       keyfile: vat/tls/orchestrator/key.pem
+    logging:
+      level: info
+      audit:
+        enabled: true
+        path: /var/log/orchestrator/audit.log
+      path: /var/log/orchestrator/orchestrator.log
+    orchestrator:
+      max_concurrent_deployments: 5
+      deployment_timeout: 5m
+      default_namespace: default
+    storage:
+      mongodb:
+        uri: mongodb://mongodb-service.default.svc.cluster.local:27017
+        database: orchestrator
+        collection: deployments
+    istio:
+      enabled: true
+      api_server: https://istiod.istio-system.svc:15012
+      ca_cert: /var/run/secrets/istio/ca.crt
+      in_cluster: true
+      config_path: ""
+---
+# Secret for TLS certificates
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orchestrator-tls
+  namespace: default
+type: kubernetes.io/tls
+data:
+  cert.pem: <base64-encoded-cert>
+  key.pem: <base64-encoded-key>
+---
+# PersistentVolume for log storage
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: orchestrator-logs-pv
+  namespace: default
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: standard
+  hostPath:
+    path: /mnt/orchestrator-logs
+---
+# PersistentVolumeClaim for logs
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orchestrator-logs-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: standard
+---
+# Deployment for the orchestrator
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: default
+spec:
+  replicas: 2 # Multiple instances for high availability
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+    spec:
+      serviceAccountName: orchestrator
+      containers:
+      - name: orchestrator
+        image: orchestrator:latest
+        ports:
+        - containerPort: 8080
+          name: metrics
+        env:
+        - name: CONFIG_PATH
+          value: "/etc/orchestrator/config.yaml"
+        volumeMounts:
+        - name: config-volume
+          mountPath: "/etc/orchestrator"
+          readOnly: true
+        - name: tls-volume
+          mountPath: "/etc/orchestrator/tls"
+          readOnly: true
+        - name: logs-volume
+          mountPath: "/var/log/orchestrator"
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: config-volume
+        configMap:
+          name: orchestrator-config
+      - name: tls-volume
+        secret:
+          secretName: orchestrator-tls
+      - name: logs-volume
+        persistentVolumeClaim:
+          claimName: orchestrator-logs-pvc
+---
+# Service for the orchestrator
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator-service
+  namespace: default
+spec:
+  selector:
+    app: orchestrator
+  ports:
+  - port: 80
+    targetPort: 8080
+    name: metrics
+  type: ClusterIP
+
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: orchestrator-monitor
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: orchestrator
+  endpoints:
+  - port: metrics
+    path: "/metrics"
+    interval: 15s
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: orchestrator-role
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update"] # Permissions for leader election Lease
+- apiGroups: ["apps"]
+  resources: ["deployments", "deployments/scale", "deployments/status"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["services", "pods"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: orchestrator-role
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orchestrator
+subjects:
+- kind: ServiceAccount
+  name: orchestrator
+  namespace: orchestrator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: orchestrator-istio
+rules:
+- apiGroups: ["networking.istio.io"]
+  resources: ["destinationrules", "virtualservices"]
+  verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: orchestrator-istio-binding
+subjects:
+- kind: ServiceAccount
+  name: orchestrator
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: orchestrator-istio
+  apiGroup: rbac.authorization.k8s.io

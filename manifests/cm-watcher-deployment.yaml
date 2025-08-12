@@ -1,0 +1,63 @@
+# ServiceAccount for config-watcher
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: config-watcher
+  namespace: default
+---
+# ClusterRole for config-watcher permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: config-watcher
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "watch", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "update"]
+---
+# ClusterRoleBinding for config-watcher
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: config-watcher-binding
+subjects:
+- kind: ServiceAccount
+  name: config-watcher
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: config-watcher
+  apiGroup: rbac.authorization.k8s.io
+---
+# Deployment for config-watcher
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: config-watcher
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: config-watcher
+  template:
+    metadata:
+      labels:
+        app: config-watcher
+    spec:
+      serviceAccountName: config-watcher
+      containers:
+      - name: config-watcher
+        image: config-watcher:latest # Replace with your image
+        env:
+        - name: NAMESPACE
+          value: "default"
+        - name: CONFIGMAP_NAME
+          value: "orchestrator-config"
+        - name: DEPLOYMENT_NAME
+          value: "orchestrator"
+        - name: ANNOTATION_KEY
+          value: "config-checksum"

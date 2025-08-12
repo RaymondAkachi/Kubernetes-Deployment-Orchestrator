@@ -1,0 +1,38 @@
+---
+# Configuration for Kubernetes Zero-Downtime Deployment Orchestrator
+kubernetes:
+  in_cluster: true
+  timeout: 10s
+  rate_limit:
+    qps: 10
+    burst: 20
+  retry_count: 3
+security:
+  auth:
+    type: k8s_token
+  rate_limit:
+    enabled: true
+    requests_per_second: 10
+    burst: 20
+logging:
+  level: info
+  audit:
+    enabled: true
+    path: /var/log/orchestrator/audit.log
+  path: /var/log/orchestrator/orchestrator.log
+orchestrator:
+  max_concurrent_deployments: 5
+  deployment_timeout: 5m
+  default_namespace: default
+storage:
+  mongodb:
+    uri: mongodb://mongodb-service.default.svc.cluster.local:27017
+    database: orchestrator
+    collection: deployments
+istio:
+  enabled: true
+  api_server: https://istiod.istio-system.svc:15012
+  ca_cert: /var/run/secrets/istio/ca.crt
+  in_cluster: true
+  config_path: ""
+...
