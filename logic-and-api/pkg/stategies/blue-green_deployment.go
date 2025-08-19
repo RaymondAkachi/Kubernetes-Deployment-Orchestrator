@@ -3,6 +3,9 @@ package strategies
 import (
 	"context"
 	"fmt"
+
+	// "log"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/RaymondAkachi/Kubernetes-Deployment-Orchestrator/logic-and-api/pkg/kubernetes"
 	"github.com/RaymondAkachi/Kubernetes-Deployment-Orchestrator/logic-and-api/pkg/kubernetes/monitoring"
@@ -47,14 +51,15 @@ func (bg *BlueGreenStrategy) Name() string {
 	return "blue-green"
 }
 
-func (bg *BlueGreenStrategy) Validate(request *types.DeploymentRequest) error {
+//TODO: IMplement validate method for create and updates requests later
+func (bg *BlueGreenStrategy) Validate(request *types.DeploymentCreateRequest) error {
 	if request.Namespace == "" {
 		return fmt.Errorf("namespace is required")
 	}
-	if request.AppName == "" {
+	if request.Name == "" {
 		return fmt.Errorf("name is required")
 	}
-	if request.Image == "" && request.NewImage == "" {
+	if request.Image == "" {
 		return fmt.Errorf("image or new_image is required")
 	}
 	if request.Replicas < 1 {
@@ -66,7 +71,7 @@ func (bg *BlueGreenStrategy) Validate(request *types.DeploymentRequest) error {
 	if request.BlueGreenConfig == nil {
 		return fmt.Errorf("blueGreenConfig is required for blue-green strategy")
 	}
-	if request.BlueGreenConfig.ServiceName == "" {
+	if request.ServiceName == "" {
 		return fmt.Errorf("serviceName is required in blueGreenConfig")
 	}
 	if request.BlueGreenConfig.ActiveEnvironment != "blue" && request.BlueGreenConfig.ActiveEnvironment != "green" {
@@ -86,7 +91,11 @@ func (bg *BlueGreenStrategy) CreateBlueGreenDeployment(ctx context.Context, requ
 	status := &storage.DeploymentStatus{
 		ID:           deploymentID,
 		Namespace:    request.Namespace,
+		Strategy:     request.Strategy,
+		ServiceName: request.ServiceName,
+		Replicas:    request.Replicas,
 		AppName:       request.Name,
+		Image:        request.Image,
 		Status:       "pending",
 		CurrentPhase: "initializing",
 		StartTime:    time.Now(),
@@ -106,6 +115,7 @@ func (bg *BlueGreenStrategy) CreateBlueGreenDeployment(ctx context.Context, requ
 		bg.updateStatusWithError(ctx, status, "failed", "check_unique", err)
 		return status, err
 	}
+
 	if existing != nil {
 		bg.updateStatusWithError(ctx, status, "failed", "check_unique", fmt.Errorf("deployment name %s already exists", request.Name))
 		return status, fmt.Errorf("deployment name %s already exists", request.Name)
@@ -113,40 +123,77 @@ func (bg *BlueGreenStrategy) CreateBlueGreenDeployment(ctx context.Context, requ
 
 	blueDeploymentName := fmt.Sprintf("%s-blue", request.Name)
 	greenDeploymentName := fmt.Sprintf("%s-green", request.Name)
+	
+	activeEnvironment := "blue"
+	targetEnvironment := "blue"
 
 	activeDeployment := blueDeploymentName
 	targetDeployment := greenDeploymentName
 	if request.BlueGreenConfig.ActiveEnvironment == "green" {
 		activeDeployment = greenDeploymentName
 		targetDeployment = blueDeploymentName
+
+		activeEnvironment = "green"
+		targetEnvironment = "blue"
+		
 	}
 
-	// Create active and target deployments
-	if err := bg.createDeployment(ctx, request.Namespace, activeDeployment, request.Image, request.Replicas, request.BlueGreenConfig.ActiveEnvironment); err != nil {
-		bg.updateStatusWithError(ctx, status, "failed", "create_active", err)
-		return status, err
-	}
-	if err := bg.createDeployment(ctx, request.Namespace, targetDeployment, request.Image, request.Replicas, request.BlueGreenConfig.ActiveEnvironment); err != nil {
-		bg.updateStatusWithError(ctx, status, "failed", "create_target", err)
-		return status, err
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// channel to receive errors from the goroutines
+	errChan := make(chan error, 2)
+
+	// Goroutine for creating the 'active deployment
+	go func() {
+		defer wg.Done()
+		if err := bg.createDeployment(ctx, status, request.Namespace, request.Name,
+			activeDeployment, request.Image, request.Replicas, activeDeployment, request.HealthCheckConfig); err != nil {
+			errChan <- fmt.Errorf("failed to create active deployment: %w", err)
+		}
+	}()
+
+	// Goroutine for creating the 'target' deployment
+	go func() {
+		defer wg.Done()
+		if err := bg.createDeployment(ctx, status, request.Namespace, request.Name,
+			targetDeployment, request.Image, request.Replicas, targetEnvironment, request.HealthCheckConfig); err != nil {
+			errChan <- fmt.Errorf("failed to create target deployment: %w", err)
+		}
+	}()
+
+	// Wait for both goroutines to finish
+	wg.Wait()
+	close(errChan)
+
+	// Check for any errors that occurred
+	for err := range errChan {
+		if err != nil {
+			bg.updateStatusWithError(ctx, status, "failed", "create_deployments", err)
+			return status, err
+		}
 	}
 
 	// Setup service for active deployment
 	// Use labels for the active deployment as selector
 	activeLabels := map[string]string{
-		"environment": request.BlueGreenConfig.ActiveEnvironment,
-		"app": activeDeployment,
+		"environment": activeEnvironment,
+		"app": request.Name,
 	}
 
-	_, err = bg.serviceMgr.SetupService(ctx, request.Namespace, request.BlueGreenConfig.ServiceName, activeLabels)
+	_, err = bg.serviceMgr.SetupService(ctx, request.Namespace, request.ServiceName, activeLabels)
 	if err != nil {
 		bg.updateStatusWithError(ctx, status, "failed", "setup_service", err)
 		return status, err
 	}
 
-	status.Metadata["active_deployment"] = activeDeployment
-	status.Metadata["target_deployment"] = targetDeployment
-	status.Metadata["service_name"] = request.BlueGreenConfig.ServiceName
+	status.ServiceName = request.ServiceName
+	status.BlueGreenConfig.ActiveEnvironment = activeEnvironment
+	status.BlueGreenConfig.TargetEnvironment = targetEnvironment
+
+	status.BlueGreenConfig.TargetDeploymentName = targetDeployment
+	status.BlueGreenConfig.ActiveDeploymentName = activeDeployment
+	
 	status.Status = "success"
 	status.CurrentPhase = "completed"
 	bg.addEvent(status, "info", "completed", "New blue-green deployment created")
@@ -157,19 +204,47 @@ func (bg *BlueGreenStrategy) CreateBlueGreenDeployment(ctx context.Context, requ
 func (bg *BlueGreenStrategy) UpdateBlueGreenDeployment(ctx context.Context, request *types.DeploymentUpdateRequest) (*storage.DeploymentStatus, error) {
 	status, err := bg.storage.GetDeploymentByName(ctx, request.Namespace, request.Name)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get deployment for update: %w", err)
+		return status, fmt.Errorf("an error occured while trying to retrive app name: %v", err)
 	}
 
+	replicas := request.Replicas
+	if replicas == 0 {
+		replicas = status.Replicas
+	}
+
+	serviceName := status.ServiceName
+
+	if request.BlueGreenConfig.NewServiceName != ""{
+		serviceName = request.BlueGreenConfig.NewServiceName
+
+		if _, err := bg.serviceMgr.GetService(ctx, request.Namespace, serviceName); err != nil{
+			labels := map[string]string{"app": request.Name, "environment":status.BlueGreenConfig.TargetDeploymentName}
+			if err = bg.CreateService(ctx, request.Namespace, request.Name, serviceName, labels); err != nil{
+				bg.updateStatusWithError(ctx, status, "failed to create new service", "upate deployment", err)
+				return nil, err
+			}
+		}
+	}
+
+	activeDeployment := status.BlueGreenConfig.ActiveDeploymentName
+	targetDeployment := status.BlueGreenConfig.TargetDeploymentName
+	targetEnvironment := status.BlueGreenConfig.TargetEnvironment
+	activeEnviroment := status.BlueGreenConfig.ActiveEnvironment
+
+	
 	status.CurrentPhase = "updating"
 	status.Status = "in-progress"
 	bg.addEvent(status, "info", "updating", "Starting blue-green deployment update")
 
-	activeDeployment := status.Metadata["active_deployment"].(string)
-	targetDeployment := status.Metadata["target_deployment"].(string)
 
 	// Update target deployment with new image
 	if err := bg.deploymentMgr.UpdateImage(ctx, request.Namespace, targetDeployment, request.NewImage); err != nil {
 		bg.updateStatusWithError(ctx, status, "failed", "update_target", err)
+		return status, err
+	}
+
+	if err := bg.kubeClient.ScaleDeployment(ctx, request.Namespace, targetDeployment, replicas); err != nil {
+		bg.updateStatusWithError(ctx, status, "failed", "update_target_replicas", err)
 		return status, err
 	}
 
@@ -189,7 +264,7 @@ func (bg *BlueGreenStrategy) UpdateBlueGreenDeployment(ctx context.Context, requ
 	}
 
 	// Switch traffic to target
-	if err := bg.serviceMgr.SwitchTrafficTo(ctx, request.Namespace, status.Metadata["service_name"].(string), targetDeployment); err != nil {
+	if err := bg.serviceMgr.SwitchTrafficTo(ctx, request.Namespace, serviceName, targetDeployment); err != nil {
 		bg.updateStatusWithError(ctx, status, "failed", "switch_traffic", err)
 		return status, err
 	}
@@ -197,14 +272,16 @@ func (bg *BlueGreenStrategy) UpdateBlueGreenDeployment(ctx context.Context, requ
 	// Monitor deployment after switch
 	if err := bg.monitorDeployment(ctx, request, status); err != nil {
 		// If monitoring fails, rollback
-		bg.serviceMgr.SwitchTrafficTo(ctx, request.Namespace, status.Metadata["service_name"].(string), activeDeployment)
+		bg.serviceMgr.SwitchTrafficTo(ctx, request.Namespace, serviceName, activeDeployment)
 		bg.updateStatusWithError(ctx, status, "failed", "monitor", err)
 		return status, err
 	}
 
 	// Swap active and target
-	status.Metadata["active_deployment"] = targetDeployment
-	status.Metadata["target_deployment"] = activeDeployment
+	status.BlueGreenConfig.ActiveDeploymentName = targetDeployment
+	status.BlueGreenConfig.TargetDeploymentName = activeDeployment
+	status.BlueGreenConfig.ActiveEnvironment = targetEnvironment
+	status.BlueGreenConfig.TargetEnvironment = activeEnviroment
 
 	status.Status = "success"
 	status.CurrentPhase = "completed"
@@ -214,10 +291,24 @@ func (bg *BlueGreenStrategy) UpdateBlueGreenDeployment(ctx context.Context, requ
 	return status, nil
 }
 
-func (bg *BlueGreenStrategy) createDeployment(ctx context.Context, namespace, name, image string, replicas int32, environment string) error {
+
+func (bg *BlueGreenStrategy) createDeployment(ctx context.Context, status *storage.DeploymentStatus,  
+	namespace, appname, deploymentName, image string, replicas int32, environment string, 
+	healthCheckConfig *types.HealthCheckConfig) error {
+	
+	container := corev1.Container{
+		Name:  appname,
+		Image: image,
+	}
+
+	if healthCheckConfig != nil && healthCheckConfig.Enabled {
+		container.LivenessProbe = types.NewKubeProbe(healthCheckConfig.LivenessProbe)
+		container.ReadinessProbe = types.NewKubeProbe(healthCheckConfig.ReadinessProbe)
+	}
+
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      deploymentName,
 			Namespace: namespace,
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -225,40 +316,55 @@ func (bg *BlueGreenStrategy) createDeployment(ctx context.Context, namespace, na
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"environment": environment,
-					"app": 	   name,
+					"app":        appname,
 				},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
 						"environment": environment,
+						"app":        appname,
 					},
 				},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  name,
-							Image: image,
-						},
-					},
+					Containers: []corev1.Container{container},
 				},
 			},
 		},
 	}
 	err := bg.kubeClient.CreateDeployment(ctx, deployment)
 	if err != nil {
-		return fmt.Errorf("failed to create deployment %s: %w", name, err)
+		return fmt.Errorf("failed to create deployment %s: %w", deploymentName, err)
 	}
-	return nil
+
+	for {
+		// Use a timeout context for the polling loop to prevent it from hanging indefinitely
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for deployment %s to be ready: %w", deploymentName, ctx.Err())
+		default:
+			// Get the latest status of the deployment
+			latestDeployment, err := bg.kubeClient.GetDeployment(ctx, namespace, deploymentName)
+			if err != nil {
+				return fmt.Errorf("failed to get deployment status: %w", err)
+			}
+			
+			// Check if the desired number of replicas are ready
+			if latestDeployment.Status.ReadyReplicas == replicas {
+				// log.Printf("Deployment %s is ready with %d replicas.", deploymentName, replicas)
+				bg.addEvent(status, "info", "deployment_check", "deployment is ready")
+
+				return nil
+			}
+			
+			// Wait before polling again
+			time.Sleep(5 * time.Second)
+		}
+
+	}
+
 }
 
-//TODO: Implemnent MonitorDeployment method later.
-func (bg *BlueGreenStrategy) monitorDeployment(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) error {
-	// Monitor logic remains the same as previous
-	return nil
-}
-
-// Other methods (e.g., Rollback, GetStatus, addEvent, updateStatusWithError) remain the same as previous
 func (bg *BlueGreenStrategy) addEvent(status *storage.DeploymentStatus, level, phase, message string) {
 	status.Events = append(status.Events, storage.DeploymentEvent{
 		Timestamp: time.Now(),
@@ -285,19 +391,22 @@ func (bg *BlueGreenStrategy) Rollback(ctx context.Context, deploymentName string
 	}
 
 	// activeDeploymentName := status.Metadata["active_deployment"].(string)
-	targetDeploymentName := status.Metadata["target_deployment"].(string)
+	activeDeployment := status.BlueGreenConfig.ActiveDeploymentName
+	targetDeployment := status.BlueGreenConfig.TargetDeploymentName
+	targetEnvironment := status.BlueGreenConfig.TargetEnvironment
+	activeEnviroment := status.BlueGreenConfig.ActiveEnvironment
 
-	request := &types.DeploymentRequest{
-		Namespace:        status.Namespace,
-		AppName:             status.AppName,
-		BlueGreenConfig:  &types.BlueGreenConfig{
-			ServiceName: status.Metadata["service_name"].(string),
-		},
-	}
+	namespace := status.Namespace
+	serviceName := status.ServiceName
 
-	if err := bg.serviceMgr.SwitchTrafficTo(ctx, request.Namespace, request.BlueGreenConfig.ServiceName, targetDeploymentName); err != nil {
+	if err := bg.serviceMgr.SwitchTrafficTo(ctx, namespace, serviceName, targetDeployment); err != nil {
 		return fmt.Errorf("failed to rollback: %w", err)
 	}
+
+	status.BlueGreenConfig.ActiveDeploymentName = targetDeployment
+	status.BlueGreenConfig.TargetDeploymentName = activeDeployment
+	status.BlueGreenConfig.ActiveEnvironment = targetEnvironment
+	status.BlueGreenConfig.TargetEnvironment = activeEnviroment
 
 	status.Status = "rolled-back"
 	status.EndTime = &[]time.Time{time.Now()}[0]
@@ -307,4 +416,56 @@ func (bg *BlueGreenStrategy) Rollback(ctx context.Context, deploymentName string
 
 func (bg *BlueGreenStrategy) GetStatus(ctx context.Context, deploymentID string) (*storage.DeploymentStatus, error) {
 	return bg.storage.GetDeployment(ctx, deploymentID)
+}
+
+func (bg *BlueGreenStrategy) monitorDeployment(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) error {
+	monitorDuration := 2 * time.Minute
+	interval := 10 * time.Second
+	start := time.Now()
+	for {
+		if request.HealthCheckConfig != nil && request.HealthCheckConfig.Enabled {
+			if _, err := bg.healthMonitor.CheckDeploymentHealth(ctx, request.Namespace, request.Name, request.HealthCheckConfig); err != nil {
+				return fmt.Errorf("monitoring health check failed: %w", err)
+			}
+		}
+		if time.Since(start) > monitorDuration {
+			break
+		}
+		time.Sleep(interval)
+	}
+	bg.addEvent(status, "info", "monitoring", "Deployment remained healthy during monitoring")
+	return nil
+}
+
+func (b *BlueGreenStrategy) CreateService(ctx context.Context, namespace, appName, serviceName string, labels map[string]string) error {
+	
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceName,
+			Namespace: namespace,
+			Labels: labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: labels,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "http",
+					Port:       80,
+					TargetPort: intstr.FromInt(8080),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+			Type: corev1.ServiceTypeClusterIP,
+		},
+	}
+
+	if _, err := b.serviceMgr.CreateService(ctx, service); err != nil {
+		// Check if service already exists
+		if errors.IsAlreadyExists(err) {
+			b.logger.Info("service already exists, skipping creation", zap.String("service", serviceName))
+			return nil
+		}
+		return fmt.Errorf("failed to create service %s: %w", serviceName, err)
+	}
+	return nil
 }

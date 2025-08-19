@@ -11,8 +11,12 @@ type DeploymentCreateRequest struct {
 	Namespace         string            `json:"namespace" validate:"required"`
 	Name              string            `json:"name" validate:"required"`
 	Image             string            `json:"image" validate:"required"`
-	Replicas          int32               `json:"replicas" validate:"required,min=1"`
+	Replicas          int32             `json:"replicas" validate:"required,min=1"`
+	ServiceName       string           	`json:"service_name" validate:"required"`
 	Strategy          string            `json:"strategy" validate:"required"`
+
+
+	//Configs for different strategies
 	BlueGreenConfig   *BlueGreenConfig  `json:"blueGreenConfig,omitempty" validate:"required_if=Strategy blue-green"`
 	CanaryConfig      *CanaryConfig     `json:"canaryConfig,omitempty" validate:"required_if=Strategy canary"`
 	ABConfig          *ABConfig         `json:"abConfig,omitempty" validate:"required_if=Strategy ab"`
@@ -26,87 +30,25 @@ type DeploymentUpdateRequest struct {
 	Name              string            `json:"name" validate:"required"`
 	NewImage          string            `json:"newImage" validate:"required"`
 	Replicas          int32               `json:"replicas,omitempty" validate:"omitempty,min=1"`
-	StrategyOverride  *StrategyOverride `json:"strategyOverride,omitempty"`
+
 	HealthCheckConfig *HealthCheckConfig `json:"healthCheckConfig,omitempty"`
-	CanaryConfig      *CanaryConfig     `json:"canaryConfig,omitempty"`
-	ABConfig          *ABConfig         `json:"abConfig,omitempty" validate:"required_if=StrategyOverride.Strategy ab"`
-	FeatureFlagConfig *FeatureFlagConfig `json:"featureFlagConfig,omitempty" validate:"required_if=StrategyOverride.Strategy feature-flag"`
+
+	ABConfig          *ABConfig         `json:"abConfig,omitempty"`
+	CanaryConfig    *CanaryConfig    `json:"canaryConfig,omitempty"`
+	BlueGreenConfig   *BlueGreenConfig   `json:"BlueGreenConfig,omitempty"`
+	FeatureFlagConfig *FeatureFlagConfig `json:"featureFlagConfig,omitempty" validate:"required_if=Strategy feature-flag"`
 }
 
 // StrategyOverride allows overriding the strategy for updates
 type StrategyOverride struct {
-	Strategy        string           `json:"strategy" validate:"required,oneof=blue-green canary"`
+	Strategy        string           `json:"strategy" validate:"required"`
 	BlueGreenConfig *BlueGreenConfig `json:"blueGreenConfig,omitempty" validate:"required_if=Strategy blue-green"`
 	CanaryConfig    *CanaryConfig    `json:"canaryConfig,omitempty" validate:"required_if=Strategy canary"`
 	ABConfig          *ABConfig         `json:"abConfig,omitempty" validate:"required_if=Strategy ab"`
 	FeatureFlagConfig *FeatureFlagConfig `json:"featureFlagConfig,omitempty" validate:"required_if=Strategy feature-flag"`
 }
 
-// BlueGreenConfig defines configuration for blue-green deployments
-type BlueGreenConfig struct {
-	ServiceName       string `json:"serviceName" validate:"required"`
-	ActiveEnvironment string `json:"activeEnvironment" validate:"required,oneof=blue green"`
-	HealthCheck       string `json:"healthCheck,omitempty"`
-}
 
-// CanaryConfig defines configuration for canary deployments
-type CanaryConfig struct {
-    TrafficIncrement      int           `json:"traffic_increment" yaml:"traffic_increment"`
-    StepDuration          time.Duration `json:"step_duration" yaml:"step_duration"`
-	InitialTrafficPercent int       `json:"initialTrafficPercent" validate:"required,min=1,max=100"`
-	// TrafficSteps      []TrafficStep `json:"trafficSteps" validate:"required"`
-	MaxTrafficPercent int           `json:"maxTrafficPercent" validate:"required,min=1,max=100"`
-	ServiceName       string        `json:"serviceName" validate:"required"`
-	AutoPromote       bool          `json:"autoPromote" validate:"required"`
-	AnalysisInterval  time.Duration `json:"analysis_interval" validate:"required"`
-}
-
-// TrafficStep represents a step in traffic shifting for canary
-type TrafficStep struct {
-	CanaryTrafficPercent int           `json:"canaryTrafficPercent" validate:"required,min=1,max=100"`
-	Duration             time.Duration `json:"duration" validate:"required,min=1s"`
-}
-
-// ABConfig defines configuration for A/B deployments
-type ABConfig struct {
-	ServiceName  string        `json:"serviceName" validate:"required"`
-	RoutingRules []RoutingRule `json:"routingRules" validate:"required,dive"`
-	HealthCheck  string        `json:"healthCheck,omitempty"`
-}
-
-// RoutingRule defines routing rules for A/B testing
-type RoutingRule struct {
-	HeaderKey   string `json:"headerKey" validate:"required"`
-	HeaderValue string `json:"headerValue" validate:"required"`
-	Variant     string `json:"variant" validate:"required,oneof=a b"`
-	Weight      int    `json:"weight" validate:"required,min=0,max=100"`
-}
-
-// FeatureFlagConfig defines configuration for feature-flag deployments
-type FeatureFlagConfig struct {
-	ConfigMapName string            `json:"configMapName" validate:"required"`
-	Flags         map[string]string `json:"flags" validate:"required"`
-	RolloutPercent int               `json:"rolloutPercent" validate:"required,min=0,max=100"`
-	HealthCheck   string            `json:"healthCheck,omitempty"`
-}
-
-// HealthCheckConfig defines health check parameters
-type HealthCheckConfig struct {
-	Enabled           bool                    `json:"enabled"`
-	PrometheusQueries []PrometheusMetricQuery `json:"prometheusQueries,omitempty"`
-	Timeout           time.Duration           `json:"timeout" validate:"min=1s"`
-	RetryInterval     time.Duration           `json:"retryInterval" validate:"min=1s"`
-	MaxRetries        int                     `json:"maxRetries" validate:"min=0"`
-}
-
-// PrometheusMetricQuery defines a Prometheus query for health checks
-type PrometheusMetricQuery struct {
-	Name        string  `json:"name" validate:"required"`
-	Query       string  `json:"query" validate:"required"`
-	Threshold   float64 `json:"threshold" validate:"required"`
-	Operator    string  `json:"operator" validate:"required,oneof=gt gte lt lte eq ne"`
-	Description string  `json:"description,omitempty"`
-}
 
 // DeploymentStatus represents the current state of a deployment
 type DeploymentStatus struct {

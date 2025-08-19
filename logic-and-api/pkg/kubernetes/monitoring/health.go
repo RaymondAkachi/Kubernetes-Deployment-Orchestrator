@@ -83,44 +83,88 @@ func (hm *HealthMonitor) CheckDeploymentHealth(ctx context.Context, namespace, d
 
 func (hm *HealthMonitor) checkKubernetesHealth(ctx context.Context, namespace, deploymentName string, result *HealthResult) error {
 	start := time.Now()
+	// Record the duration of the health check.
 	defer func() {
 		hm.metrics.RecordHealthCheckDuration(namespace, deploymentName, "kubernetes", time.Since(start).Seconds())
 	}()
 
+	// Assume healthy and update to false if any check fails.
+	result.Healthy = true
+	result.CheckResults = []CheckResult{}
+
+	// 1. Check for deployment existence
 	deployment, err := hm.kubeClient.GetDeployment(ctx, namespace, deploymentName)
 	if err != nil {
+		result.Healthy = false
+		result.CheckResults = append(result.CheckResults, CheckResult{
+			Name:    "kubernetes_get_deployment",
+			Passed:  false,
+			Message: fmt.Sprintf("Failed to get deployment: %v", err),
+		})
 		return fmt.Errorf("failed to get deployment: %w", err)
 	}
 
-	if deployment.Status.ReadyReplicas == 0 {
+	// 2. Check for ready replicas
+	desiredReplicas := int32(0)
+	if deployment.Spec.Replicas != nil {
+		desiredReplicas = *deployment.Spec.Replicas
+	}
+	if deployment.Status.ReadyReplicas < desiredReplicas {
 		result.Healthy = false
 		result.CheckResults = append(result.CheckResults, CheckResult{
 			Name:    "kubernetes_ready_replicas",
 			Passed:  false,
 			Value:   float64(deployment.Status.ReadyReplicas),
-			Message: "No ready replicas available",
+			Message: fmt.Sprintf("Ready replicas (%d) do not match desired replicas (%d)", deployment.Status.ReadyReplicas, desiredReplicas),
 		})
-		return nil
+	} else {
+		result.CheckResults = append(result.CheckResults, CheckResult{
+			Name:    "kubernetes_ready_replicas",
+			Passed:  true,
+			Value:   float64(deployment.Status.ReadyReplicas),
+			Message: "All replicas are ready",
+		})
 	}
-
+	
+	// 3. Check deployment conditions
+	isAvailable := false
+	isProgressing := false
 	for _, condition := range deployment.Status.Conditions {
-		if condition.Type == "Available" && condition.Status != "True" {
-			result.Healthy = false
-			result.CheckResults = append(result.CheckResults, CheckResult{
-				Name:    "kubernetes_available",
-				Passed:  false,
-				Message: fmt.Sprintf("Deployment not available: %s", condition.Message),
-			})
-			return nil
+		if condition.Type == "Available" && condition.Status == "True" {
+			isAvailable = true
+		}
+		if condition.Type == "Progressing" && condition.Status == "True" {
+			isProgressing = true
 		}
 	}
 
-	result.CheckResults = append(result.CheckResults, CheckResult{
-		Name:    "kubernetes_health",
-		Passed:  true,
-		Value:   float64(deployment.Status.ReadyReplicas),
-		Message: "Kubernetes health check passed",
-	})
+	if !isAvailable {
+		result.Healthy = false
+		result.CheckResults = append(result.CheckResults, CheckResult{
+			Name:    "kubernetes_available",
+			Passed:  false,
+			Message: "Deployment not available",
+		})
+	} else {
+		result.CheckResults = append(result.CheckResults, CheckResult{
+			Name:   "kubernetes_available",
+			Passed: true,
+		})
+	}
+	
+	if !isProgressing {
+		result.Healthy = false
+		result.CheckResults = append(result.CheckResults, CheckResult{
+			Name:    "kubernetes_progressing",
+			Passed:  false,
+			Message: "Deployment not progressing",
+		})
+	} else {
+		result.CheckResults = append(result.CheckResults, CheckResult{
+			Name:   "kubernetes_progressing",
+			Passed: true,
+		})
+	}
 
 	return nil
 }

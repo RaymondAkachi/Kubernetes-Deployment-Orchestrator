@@ -23,7 +23,7 @@ type Config struct {
 // KubernetesConfig defines Kubernetes client settings
 type KubernetesConfig struct {
 	InCluster  bool          `mapstructure:"in_cluster" validate:"boolean"`
-	ConfigPath string        `mapstructure:"config_path"`
+	// ConfigPath string        `mapstructure:"config_path"`
 	APIServer  string        `mapstructure:"api_server" validate:"required_if=InCluster false,uri"`
 	CACert     string        `mapstructure:"ca_cert" validate:"required_if=InCluster false"`
 	Timeout    time.Duration `mapstructure:"timeout" validate:"required,min=1s"`

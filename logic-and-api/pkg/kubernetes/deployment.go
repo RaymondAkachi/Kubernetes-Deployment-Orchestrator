@@ -107,3 +107,31 @@ func (dm *DeploymentManager) IsHealthy(ctx context.Context, namespace, name stri
     
     return true, nil
 }
+
+
+func(m *DeploymentManager) DeleteDeployment(ctx context.Context, namespace, name string) error {
+    err := m.client.DeleteDeployment(ctx, namespace, name)
+    if err != nil {
+        return fmt.Errorf("failed to delete deployment: %w", err)
+    }
+    
+    m.logger.Info("deployment deleted",
+        zap.String("namespace", namespace),
+        zap.String("name", name))
+    
+    return nil
+}
+
+func(m *DeploymentManager) IsDeploymentReady(ctx context.Context, namespace, name string) (bool, error) {
+    deployment, err := m.client.GetDeployment(ctx, namespace, name)
+    if err != nil {
+        return false, fmt.Errorf("failed to get deployment: %w", err)
+    }
+    
+    // Check if the deployment is ready
+    if deployment.Status.ReadyReplicas >= deployment.Status.Replicas {
+        return true, nil
+    }
+    
+    return false, nil
+}   

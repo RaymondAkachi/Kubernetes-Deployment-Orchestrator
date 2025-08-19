@@ -2,8 +2,7 @@
 # istioctl install --set profile=demo -y
 # kubectl label namespace default istio-injection=enabled
 ---
-# ConfigMap for orchestrator configuration
-apiVersion: v1
+apiVersion: v1 # ConfigMap for orchestrator configuration
 kind: ConfigMap
 metadata:
   name: orchestrator-config
@@ -50,6 +49,13 @@ data:
       ca_cert: /var/run/secrets/istio/ca.crt
       in_cluster: true
       config_path: ""
+---
+#TODO: Implement newly created service account in deployment
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestrator
+  namespace: orchestrator-system
 ---
 # Secret for TLS certificates
 apiVersion: v1

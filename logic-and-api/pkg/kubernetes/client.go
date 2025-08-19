@@ -4,6 +4,7 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -57,7 +58,7 @@ func NewClient(cfg *config.Config, logger *zap.Logger) (*Client, error) {
             return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
         }
     } else {
-        configPath := cfg.Kubernetes.ConfigPath
+        configPath := os.Getenv("CONFIG_PATH")
         if configPath == "" {
             configPath = clientcmd.RecommendedHomeFile
         }
@@ -153,26 +154,43 @@ func (c *Client) UpdateDeployment(ctx context.Context, deployment *appsv1.Deploy
 }
 
 func (c *Client) WaitForDeploymentReady(ctx context.Context, namespace, name string, timeout time.Duration) error {
-    ctx, cancel := context.WithTimeout(ctx, timeout)
-    defer cancel()
-    
-    return wait.PollImmediate(5*time.Second, timeout, func() (bool, error) {
-        deployment, err := c.GetDeployment(ctx, namespace, name)
-        if err != nil {
-            return false, err
-        }
-        
-        // Check if deployment is ready
-        for _, condition := range deployment.Status.Conditions {
-            if condition.Type == appsv1.DeploymentProgressing {
-                if condition.Status == corev1.ConditionTrue && condition.Reason == "NewReplicaSetAvailable" {
-                    return deployment.Status.ReadyReplicas == *deployment.Spec.Replicas, nil
-                }
-            }
-        }
-        
-        return false, nil
-    })
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	return wait.PollImmediate(5*time.Second, timeout, func() (bool, error) {
+		deployment, err := c.GetDeployment(ctx, namespace, name)
+		if err != nil {
+			// Handle cases where the deployment might not exist yet.
+			// The PollImmediate will continue polling unless the error is fatal.
+			if errors.IsNotFound(err) {
+				return false, nil
+			}
+            
+			return false, err
+		}
+
+		// Check for the "Available" condition.
+		isAvailable := false
+		isProgressing := false
+		for _, condition := range deployment.Status.Conditions {
+			if condition.Type == appsv1.DeploymentAvailable && condition.Status == corev1.ConditionTrue {
+				isAvailable = true
+			}
+			if condition.Type == appsv1.DeploymentProgressing && condition.Status == corev1.ConditionTrue {
+				isProgressing = true
+			}
+		}
+
+		// Check if the number of ready replicas matches the desired replicas.
+		replicasReady := deployment.Status.ReadyReplicas == *deployment.Spec.Replicas
+
+		// The deployment is ready only when all three conditions are met.
+		if isAvailable && isProgressing && replicasReady {
+			return true, nil
+		}
+		
+		return false, nil
+	})
 }
 
 func (c *Client) ScaleDeployment(ctx context.Context, namespace, name string, replicas int32) error {
@@ -204,5 +222,20 @@ func (c *Client) UpdateDepWithNamespace(ctx context.Context, namespace, deployme
             break
         }
     }
+    return nil
+}
+
+func(c *Client) DeleteDeployment(ctx context.Context, namespace, name string) error {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+
+    err := c.clientset.AppsV1().Deployments(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+    if err != nil {
+        if errors.IsNotFound(err) {
+            return fmt.Errorf("deployment %s/%s not found", namespace, name)
+        }
+        return fmt.Errorf("failed to delete deployment %s/%s: %w", namespace, name, err)
+    }
+
     return nil
 }

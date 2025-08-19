@@ -30,6 +30,8 @@ type IstioManager interface {
 	CreateVirtualService(ctx context.Context, namespace, serviceName string, hosts []string, routes []Route) error
 	UpdateVirtualServiceWeights(ctx context.Context, namespace, serviceName string, weights map[string]int) error
 	UpdateVirtualServiceRoutes(ctx context.Context, namespace, serviceName string, routes []Route) error
+	DeleteVirtualService(ctx context.Context, namespace, serviceName string) error
+	DeleteDestinationRule(ctx context.Context, namespace, serviceName string) error
 }
 
 // Subset represents a subset in a DestinationRule
@@ -53,7 +55,7 @@ type Match struct {
 // Route represents a route in a VirtualService
 type Route struct {
 	Destination Destination
-	Weight      int
+	Weight      int32
 	Match    []Match //Added becasue of A/B Deployment
 }
 
@@ -225,6 +227,7 @@ func (m *istioManagerImpl) UpdateVirtualServiceWeights(ctx context.Context, name
 	})
 }
 
+
 func (im *istioManagerImpl) UpdateVirtualServiceRoutes(ctx context.Context, namespace, serviceName string, routes []Route) error {
 	// Fetch the existing VirtualService
 	vs := &istio.VirtualService{
@@ -308,4 +311,54 @@ func toIstioRoutes(routes []Route) []*networkingv1alpha3.HTTPRouteDestination {
 		}
 	}
 	return result
+}
+
+func(im *istioManagerImpl) DeleteVirtualService(ctx context.Context, namespace, serviceName string) error {
+	if !im.config.Enabled {
+		return fmt.Errorf("istio is disabled")
+	}
+
+	err := im.client.NetworkingV1alpha3().VirtualServices(namespace).Delete(ctx, serviceName, metav1.DeleteOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			im.logger.Info("VirtualService not found for deletion",
+				zap.String("namespace", namespace),
+				zap.String("name", serviceName))
+			return nil
+		}
+		im.logger.Error("failed to delete VirtualService",
+			zap.String("namespace", namespace),
+			zap.String("name", serviceName),
+			zap.Error(err))
+		return fmt.Errorf("failed to delete VirtualService %s/%s: %w", namespace, serviceName, err)
+	}
+	im.logger.Info("deleted VirtualService",
+		zap.String("namespace", namespace),
+		zap.String("name", serviceName))
+	return nil
+}
+
+func(im *istioManagerImpl) DeleteDestinationRule(ctx context.Context, namespace, serviceName string) error {
+	if !im.config.Enabled {
+		return fmt.Errorf("istio is disabled")
+	}
+
+	err := im.client.NetworkingV1alpha3().DestinationRules(namespace).Delete(ctx, serviceName, metav1.DeleteOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			im.logger.Info("DestinationRule not found for deletion",
+				zap.String("namespace", namespace),
+				zap.String("name", serviceName))
+			return nil
+		}
+		im.logger.Error("failed to delete DestinationRule",
+			zap.String("namespace", namespace),
+			zap.String("name", serviceName),
+			zap.Error(err))
+		return fmt.Errorf("failed to delete DestinationRule %s/%s: %w", namespace, serviceName, err)
+	}
+	im.logger.Info("deleted DestinationRule",
+		zap.String("namespace", namespace),
+		zap.String("name", serviceName))
+	return nil
 }

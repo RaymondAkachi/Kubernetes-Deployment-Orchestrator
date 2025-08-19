@@ -3,6 +3,7 @@ package strategies
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -59,15 +61,27 @@ func (ab *ABStrategy) Create(ctx context.Context, request *types.DeploymentCreat
 	}
 
 	deploymentID := uuid.New().String()
+
 	status := &storage.DeploymentStatus{
 		ID:           deploymentID,
 		Namespace:    request.Namespace,
-		AppName:         request.Name,
+		Replicas:     request.Replicas,
+		ServiceName:  request.ServiceName,
+		Strategy:     request.Strategy,
+		AppName:      request.Name,
+		Image:        request.Image,
 		Status:       "pending",
 		CurrentPhase: "initializing",
 		StartTime:    time.Now(),
 		Metadata:     make(map[string]interface{}),
 		Events:       []storage.DeploymentEvent{},
+	}
+
+	// Store AB configuration in metadata with proper structure
+	status.ABConfig = &storage.ABConfig{
+		ServiceName:  request.ServiceName,
+		RoutingRules: ab.convertRoutingRules(request.ABConfig.RoutingRules),
+		HealthCheck:  request.ABConfig.HealthCheck,
 	}
 
 	if err := ab.storage.SaveDeployment(ctx, status); err != nil {
@@ -76,69 +90,38 @@ func (ab *ABStrategy) Create(ctx context.Context, request *types.DeploymentCreat
 
 	ab.addEvent(status, "info", "initializing", "Starting A/B deployment creation")
 
-	// Check if deployment name is unique
-	existing, err := ab.storage.GetDeploymentByName(ctx, request.Namespace, request.Name)
-	if err != nil && !errors.IsNotFound(err) {
+	// Check uniqueness
+	if err := ab.checkDeploymentUniqueness(ctx, request.Namespace, request.Name); err != nil {
 		ab.updateStatusWithError(ctx, status, "failed", "check_unique", err)
 		return status, err
 	}
-	if existing != nil {
-		ab.updateStatusWithError(ctx, status, "failed", "check_unique", fmt.Errorf("deployment name %s already exists", request.Name))
-		return status, fmt.Errorf("deployment name %s already exists", request.Name)
-	}
 
-	// Create A and B deployments
+	// Create A and B deployments concurrently with better error handling
 	aDeploymentName := fmt.Sprintf("%s-a", request.Name)
 	bDeploymentName := fmt.Sprintf("%s-b", request.Name)
 
-	if err := ab.createDeployment(ctx, request.Namespace, aDeploymentName, request.Image, request.Replicas, "a"); err != nil {
-		ab.updateStatusWithError(ctx, status, "failed", "create_a", err)
-		return status, err
-	}
-	if err := ab.createDeployment(ctx, request.Namespace, bDeploymentName, request.Image, request.Replicas, "b"); err != nil {
-		ab.updateStatusWithError(ctx, status, "failed", "create_b", err)
+	if err := ab.createABDeployments(ctx, request, aDeploymentName, bDeploymentName, status); err != nil {
 		return status, err
 	}
 
-	serviceName := request.CanaryConfig.ServiceName
+	serviceName := ab.getServiceName(request.ServiceName, request.Name)
 
-	if request.CanaryConfig.ServiceName == "" {
-		serviceName = fmt.Sprintf("%s-service", request.Name)
-	}
-
-	if err := ab.CreateService(ctx, request.Namespace, request.Name, serviceName); err != nil{
-		ab.updateStatusWithError(ctx, status, "failed", fmt.Sprintf("create %s", serviceName), err)
+	if err := ab.createOrUpdateService(ctx, request.Namespace, request.Name, serviceName, status); err != nil {
 		return status, err
 	}
 
-	if err := ab.setupIstioRouting(ctx, request, serviceName); err != nil {
-		ab.updateStatusWithError(ctx, status, "failed", "setup_istio", err)
+	// Setup Istio routing with proper subsets
+	if err := ab.setupInitialIstioRouting(ctx, request, serviceName, status); err != nil {
 		return status, err
 	}
 
-	// Perform health check if enabled
-	if request.HealthCheckConfig != nil && request.HealthCheckConfig.Enabled {
-		if err := ab.performHealthCheck(ctx, request.Namespace, aDeploymentName, request.HealthCheckConfig); err != nil {
-			ab.updateStatusWithError(ctx, status, "failed", "health_check_a", err)
-			return status, err
-		}
-		if err := ab.performHealthCheck(ctx, request.Namespace, bDeploymentName, request.HealthCheckConfig); err != nil {
-			ab.updateStatusWithError(ctx, status, "failed", "health_check_b", err)
-			return status, err
-		}
+	// Perform comprehensive health checks
+	if err := ab.performInitialHealthChecks(ctx, request, aDeploymentName, bDeploymentName, status); err != nil {
+		return status, err
 	}
 
-	status.Metadata["a_deployment"] = aDeploymentName
-	status.Metadata["b_deployment"] = bDeploymentName
-	status.Metadata["service_name"] = request.ABConfig.ServiceName
-	status.Metadata["routing_rules"] = request.ABConfig.RoutingRules
-	status.Status = "success"
-	status.CurrentPhase = "completed"
-	ab.addEvent(status, "info", "completed", "A/B deployment created successfully")
-	if err := ab.storage.SaveDeployment(ctx, status); err != nil {
-		return status, fmt.Errorf("failed to save final status: %w", err)
-	}
-	return status, nil
+	ab.finalizeCreation(status, aDeploymentName, bDeploymentName)
+	return status, ab.storage.SaveDeployment(ctx, status)
 }
 
 func (ab *ABStrategy) Update(ctx context.Context, request *types.DeploymentUpdateRequest) (*storage.DeploymentStatus, error) {
@@ -147,52 +130,51 @@ func (ab *ABStrategy) Update(ctx context.Context, request *types.DeploymentUpdat
 		return nil, fmt.Errorf("failed to get deployment for update: %w", err)
 	}
 
+	// Update status
 	status.CurrentPhase = "updating"
 	status.Status = "in-progress"
 	ab.addEvent(status, "info", "updating", "Starting A/B deployment update")
-	if err := ab.storage.SaveDeployment(ctx, status); err != nil {
-		return status, fmt.Errorf("failed to save status: %w", err)
-	}
 
-	// Determine which variant to update (default to B for new image)
-	bDeploymentName := status.Metadata["b_deployment"].(string)
-	if err := ab.deploymentMgr.UpdateImage(ctx, request.Namespace, bDeploymentName, request.NewImage); err != nil {
-		ab.updateStatusWithError(ctx, status, "failed", "update_b", err)
+	// Determine service name
+	serviceName := ab.determineServiceName(ctx, request, status)
+
+	// Get deployment names from metadata with validation
+	aDeploymentName, bDeploymentName, err := ab.getDeploymentNames(status)
+	if err != nil {
+		ab.updateStatusWithError(ctx, status, "failed", "get_deployments", err)
 		return status, err
 	}
 
-	if err := ab.kubeClient.WaitForDeploymentReady(ctx, request.Namespace, bDeploymentName, 5*time.Minute); err != nil {
-		ab.updateStatusWithError(ctx, status, "failed", "wait_b_ready", err)
-		return status, err
-	}
-
-	// Apply new routing rules if provided
-	routingRules := status.Metadata["routing_rules"].([]types.RoutingRule)
-	if request.ABConfig != nil && len(request.ABConfig.RoutingRules) > 0 {
-		routingRules = request.ABConfig.RoutingRules
-	}
-	if err := ab.updateIstioRouting(ctx, request.Namespace, status.Metadata["service_name"].(string), routingRules); err != nil {
-		ab.updateStatusWithError(ctx, status, "failed", "update_istio", err)
-		return status, err
-	}
-
-	// Perform health check if enabled
-	if request.HealthCheckConfig != nil && request.HealthCheckConfig.Enabled {
-		if err := ab.performHealthCheck(ctx, request.Namespace, bDeploymentName, request.HealthCheckConfig); err != nil {
-			ab.updateStatusWithError(ctx, status, "failed", "health_check_b", err)
-			return status, err
+	// Choose which variant to update (B by default for new versions)
+	targetDeployment := bDeploymentName
+	if request.ABConfig != nil {
+		// Allow specifying which variant to update
+		if variant := request.ABConfig.TargetVariant; variant == "a" {
+			targetDeployment = aDeploymentName
 		}
 	}
 
-	status.Metadata["routing_rules"] = routingRules
-	status.Status = "success"
-	status.CurrentPhase = "completed"
-	status.EndTime = &[]time.Time{time.Now()}[0]
-	ab.addEvent(status, "info", "completed", "A/B deployment updated successfully")
-	if err := ab.storage.SaveDeployment(ctx, status); err != nil {
-		return status, fmt.Errorf("failed to save final status: %w", err)
+	// Update the target deployment
+	if err := ab.updateDeploymentImage(ctx, request, targetDeployment, status); err != nil {
+		return status, err
 	}
-	return status, nil
+
+	// Update routing rules if provided
+	if err := ab.updateRoutingConfiguration(ctx, request, status, serviceName); err != nil {
+		return status, err
+	}
+
+	// Perform health checks
+	if err := ab.performUpdateHealthCheck(ctx, request, targetDeployment, status); err != nil {
+		return status, err
+	}
+
+	status.Metadata["last_update"] = time.Now().Format(time.RFC3339)
+	status.Metadata["updated_deployment"] = targetDeployment
+	status.Image = request.NewImage
+	status.ServiceName = serviceName
+	ab.finalizeUpdate(status)
+	return status, ab.storage.SaveDeployment(ctx, status)
 }
 
 func (ab *ABStrategy) Rollback(ctx context.Context, request *types.RollbackRequest) error {
@@ -201,28 +183,201 @@ func (ab *ABStrategy) Rollback(ctx context.Context, request *types.RollbackReque
 		return fmt.Errorf("failed to get deployment status: %w", err)
 	}
 
-	// Reset traffic to A variant
-	routingRules := []types.RoutingRule{
-		{HeaderKey: "x-ab-test", HeaderValue: "a", Variant: "a", Weight: 100},
-	}
-	if err := ab.updateIstioRouting(ctx, request.Namespace, status.Metadata["service_name"].(string), routingRules); err != nil {
-		ab.logger.Warn("failed to reset routing during rollback", zap.Error(err))
+	status.CurrentPhase = "rolling-back"
+	status.Status = "in-progress"
+	ab.addEvent(status, "info", "rollback", fmt.Sprintf("Starting rollback: %s", request.Reason))
+
+	// Get service name and deployment names
+	serviceName := status.ServiceName
+	if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
+		serviceName = status.ABConfig.ServiceName
 	}
 
-	// Scale down B variant
-	if err := ab.kubeClient.ScaleDeployment(ctx, request.Namespace, status.Metadata["b_deployment"].(string), 0); err != nil {
+	TDeployment := status.Metadata["updated_deployment"].(string)
+
+	// Reset traffic to A variant (stable version)
+	rollbackRules := []types.RoutingRule{
+		{HeaderKey: "x-deployment", HeaderValue: "stable", Variant: "a", Weight: 100},
+		{HeaderKey: "x-deployment", HeaderValue: "test", Variant: "b", Weight: 0},
+	}
+
+	if err := ab.updateIstioRouting(ctx, request.Namespace, serviceName, rollbackRules); err != nil {
+		ab.logger.Warn("failed to reset routing during rollback", zap.Error(err))
+		// Don't fail the rollback if routing update fails
+	}
+
+	// Scale down B variant to conserve resources
+	if err := ab.kubeClient.ScaleDeployment(ctx, request.Namespace, TDeployment, 0); err != nil {
 		ab.logger.Warn("failed to scale down B variant during rollback", zap.Error(err))
 	}
 
+	// Update status metadata
+	status.ABConfig.RoutingRules = ab.convertRoutingRules(rollbackRules)
 	status.Status = "rolled-back"
+	status.CurrentPhase = "completed"
 	status.EndTime = &[]time.Time{time.Now()}[0]
-	ab.addEvent(status, "info", "rollback", fmt.Sprintf("Rolled back to A variant: %s", request.Reason))
+	ab.addEvent(status, "info", "rollback_completed", fmt.Sprintf("Rolled back to A variant: %s", request.Reason))
+
 	return ab.storage.SaveDeployment(ctx, status)
 }
 
 func (ab *ABStrategy) GetStatus(ctx context.Context, namespace, name string) (*storage.DeploymentStatus, error) {
-	return ab.storage.GetDeploymentByName(ctx, namespace, name)
+	status, err := ab.storage.GetDeploymentByName(ctx, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+
+	// Enrich status with real-time information
+	if err := ab.enrichStatusWithRealTimeData(ctx, status); err != nil {
+		ab.logger.Warn("failed to enrich status with real-time data", zap.Error(err))
+	}
+
+	return status, nil
 }
+
+// Additional management methods
+
+func (ab *ABStrategy) SwitchTraffic(ctx context.Context, namespace, name string, routingRules []types.RoutingRule) error {
+	status, err := ab.storage.GetDeploymentByName(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment status: %w", err)
+	}
+
+	if err := ab.validateRoutingRules(routingRules); err != nil {
+		return fmt.Errorf("invalid routing rules: %w", err)
+	}
+
+	serviceName := status.ServiceName
+	if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
+		serviceName = status.ABConfig.ServiceName
+	}
+
+	if err := ab.updateIstioRouting(ctx, namespace, serviceName, routingRules); err != nil {
+		return fmt.Errorf("failed to update traffic routing: %w", err)
+	}
+
+	// Update stored configuration
+	status.ABConfig.RoutingRules = ab.convertRoutingRules(routingRules)
+	status.CurrentPhase = "traffic-switched"
+	ab.addEvent(status, "info", "traffic-switch", "Traffic routing updated successfully")
+
+	return ab.storage.SaveDeployment(ctx, status)
+}
+
+func (ab *ABStrategy) ScaleVariant(ctx context.Context, namespace, name, variant string, replicas int32) error {
+	if variant != "a" && variant != "b" {
+		return fmt.Errorf("invalid variant: %s, must be 'a' or 'b'", variant)
+	}
+
+	status, err := ab.storage.GetDeploymentByName(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment status: %w", err)
+	}
+
+	deploymentName := fmt.Sprintf("%s-%s", name, variant)
+
+	if err := ab.kubeClient.ScaleDeployment(ctx, namespace, deploymentName, replicas); err != nil {
+		return fmt.Errorf("failed to scale deployment %s: %w", deploymentName, err)
+	}
+
+	// Update metadata
+	metadataKey := fmt.Sprintf("%s_replicas", variant)
+	status.Metadata[metadataKey] = replicas
+
+	ab.addEvent(status, "info", "scale", fmt.Sprintf("Scaled variant %s to %d replicas", variant, replicas))
+	return ab.storage.SaveDeployment(ctx, status)
+}
+
+func (ab *ABStrategy) GetVariantHealth(ctx context.Context, namespace, name, variant string) (*monitoring.HealthResult, error) {
+	if variant != "a" && variant != "b" {
+		return nil, fmt.Errorf("invalid variant: %s, must be 'a' or 'b'", variant)
+	}
+
+	deploymentName := fmt.Sprintf("%s-%s", name, variant)
+
+	status, err := ab.storage.GetDeploymentByName(ctx, namespace, name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get deployment status: %w", err)
+	}
+
+	var healthConfig *types.HealthCheckConfig
+	if status.HealthCheck != nil {
+		healthConfig = status.HealthCheck
+	}
+
+	if healthConfig == nil || !healthConfig.Enabled {
+		return &monitoring.HealthResult{
+			Healthy:   true,
+			Message:   "Health checks disabled",
+			Timestamp: time.Now(),
+		}, nil
+	}
+
+	return ab.healthMonitor.CheckDeploymentHealth(ctx, namespace, deploymentName, healthConfig)
+}
+
+func (ab *ABStrategy) PromoteVariant(ctx context.Context, namespace, name, variant string) error {
+	if variant != "a" && variant != "b" {
+		return fmt.Errorf("invalid variant: %s, must be 'a' or 'b'", variant)
+	}
+
+	status, err := ab.storage.GetDeploymentByName(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment status: %w", err)
+	}
+
+	// Create routing rules that send all traffic to the promoted variant
+	promotionRules := []types.RoutingRule{
+		{HeaderKey: "x-deployment", HeaderValue: "promoted", Variant: variant, Weight: 100},
+	}
+
+	// Set opposite variant to 0 weight
+	oppositeVariant := "b"
+	if variant == "b" {
+		oppositeVariant = "a"
+	}
+	promotionRules = append(promotionRules, types.RoutingRule{
+		HeaderKey: "x-deployment", HeaderValue: "deprecated", Variant: oppositeVariant, Weight: 0,
+	})
+
+	serviceName := status.ServiceName
+	if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
+		serviceName = status.ABConfig.ServiceName
+	}
+
+	if err := ab.updateIstioRouting(ctx, namespace, serviceName, promotionRules); err != nil {
+		return fmt.Errorf("failed to promote variant %s: %w", variant, err)
+	}
+
+	// Update configuration
+	status.ABConfig.RoutingRules = ab.convertRoutingRules(promotionRules)
+	status.CurrentPhase = fmt.Sprintf("variant-%s-promoted", variant)
+	ab.addEvent(status, "info", "promotion", fmt.Sprintf("Promoted variant %s to receive all traffic", variant))
+
+	return ab.storage.SaveDeployment(ctx, status)
+}
+
+func (ab *ABStrategy) GetTrafficDistribution(ctx context.Context, namespace, name string) (map[string]int32, error) {
+	status, err := ab.storage.GetDeploymentByName(ctx, namespace, name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get deployment status: %w", err)
+	}
+
+	distribution := make(map[string]int32)
+	if status.ABConfig != nil && len(status.ABConfig.RoutingRules) > 0 {
+		for _, rule := range status.ABConfig.RoutingRules {
+			if existing, ok := distribution[rule.Variant]; ok {
+				distribution[rule.Variant] = existing + rule.Weight
+			} else {
+				distribution[rule.Variant] = rule.Weight
+			}
+		}
+	}
+
+	return distribution, nil
+}
+
+// Helper methods
 
 func (ab *ABStrategy) validateCreateRequest(request *types.DeploymentCreateRequest) error {
 	if request.Namespace == "" {
@@ -243,81 +398,372 @@ func (ab *ABStrategy) validateCreateRequest(request *types.DeploymentCreateReque
 	if request.ABConfig == nil {
 		return fmt.Errorf("abConfig is required for A/B strategy")
 	}
-	if request.ABConfig.ServiceName == "" {
-		return fmt.Errorf("serviceName is required in abConfig")
+	if request.ServiceName == "" {
+		return fmt.Errorf("serviceName is required")
 	}
-	if len(request.ABConfig.RoutingRules) == 0 {
-		return fmt.Errorf("routingRules must not be empty in abConfig")
+
+	return ab.validateRoutingRules(request.ABConfig.RoutingRules)
+}
+
+func (ab *ABStrategy) validateRoutingRules(rules []types.RoutingRule) error {
+	if len(rules) == 0 {
+		return fmt.Errorf("routingRules must not be empty")
 	}
-	totalWeight := 0
-	for _, rule := range request.ABConfig.RoutingRules {
+
+	totalWeight := int32(0)
+	variantWeights := make(map[string]int32)
+
+	for _, rule := range rules {
 		if rule.Weight < 0 || rule.Weight > 100 {
 			return fmt.Errorf("weight must be between 0 and 100")
 		}
+		if rule.Variant != "a" && rule.Variant != "b" {
+			return fmt.Errorf("variant must be 'a' or 'b'")
+		}
 		totalWeight += rule.Weight
+		variantWeights[rule.Variant] += rule.Weight
 	}
+
 	if totalWeight != 100 {
 		return fmt.Errorf("total weight of routing rules must equal 100, got %d", totalWeight)
+	}
+
+	return nil
+}
+
+func (ab *ABStrategy) checkDeploymentUniqueness(ctx context.Context, namespace, name string) error {
+	existing, err := ab.storage.GetDeploymentByName(ctx, namespace, name)
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	if existing != nil {
+		return fmt.Errorf("deployment name %s already exists", name)
 	}
 	return nil
 }
 
-func (ab *ABStrategy) createDeployment(ctx context.Context, namespace, name, image string, replicas int32, variant string) error {
-	deployment := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app":     name,
-					"variant": variant,
-				},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app":     name,
-						"variant": variant,
-					},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  name,
-							Image: image,
-						},
-					},
-				},
-			},
-		},
+func (ab *ABStrategy) createABDeployments(ctx context.Context, request *types.DeploymentCreateRequest, 
+	aDeploymentName, bDeploymentName string, status *storage.DeploymentStatus) error {
+	
+	var wg sync.WaitGroup
+	errChan := make(chan error, 2)
+	
+	wg.Add(2)
+
+	// Create A deployment
+	go func() {
+		defer wg.Done()
+		if err := ab.createDeployment(ctx, request.Namespace, request.Name,
+			aDeploymentName, request.Image, request.Replicas, "a", request.HealthCheckConfig); err != nil {
+			errChan <- fmt.Errorf("failed to create A deployment: %w", err)
+		}
+	}()
+
+	// Create B deployment
+	go func() {
+		defer wg.Done()
+		if err := ab.createDeployment(ctx, request.Namespace, request.Name,
+			bDeploymentName, request.Image, request.Replicas, "b", request.HealthCheckConfig); err != nil {
+			errChan <- fmt.Errorf("failed to create B deployment: %w", err)
+		}
+	}()
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		if err != nil {
+			ab.updateStatusWithError(ctx, status, "failed", "create_deployments", err)
+			return err
+		}
 	}
-	if err := ab.kubeClient.CreateDeployment(ctx, deployment); err != nil {
-		return fmt.Errorf("failed to create %s deployment: %w", variant, err)
-	}
-	return ab.kubeClient.WaitForDeploymentReady(ctx, namespace, name, 5*time.Minute)
+
+	return nil
 }
 
-func (ab *ABStrategy) setupIstioRouting(ctx context.Context, request *types.DeploymentCreateRequest, ServiceName string) error {
+func (ab *ABStrategy) getServiceName(requestServiceName, appName string) string {
+	if requestServiceName != "" {
+		return requestServiceName
+	}
+	return fmt.Sprintf("%s-service", appName)
+}
+
+func (ab *ABStrategy) createOrUpdateService(ctx context.Context, namespace, appName, serviceName string, 
+	status *storage.DeploymentStatus) error {
+	
+	if err := ab.CreateService(ctx, namespace, appName, serviceName); err != nil {
+		ab.updateStatusWithError(ctx, status, "failed", fmt.Sprintf("create_service_%s", serviceName), err)
+		return err
+	}
+	return nil
+}
+
+func (ab *ABStrategy) setupInitialIstioRouting(ctx context.Context, request *types.DeploymentCreateRequest, 
+	serviceName string, status *storage.DeploymentStatus) error {
+	
 	subsets := []istio.Subset{
 		{Name: "a", Labels: map[string]string{"variant": "a"}},
 		{Name: "b", Labels: map[string]string{"variant": "b"}},
 	}
-	if err := ab.istioMgr.CreateDestinationRule(ctx, request.Namespace, ServiceName, subsets); err != nil {
+
+	if err := ab.setupIstioRouting(ctx, request, serviceName, subsets); err != nil {
+		ab.updateStatusWithError(ctx, status, "failed", "setup_istio", err)
+		return err
+	}
+	return nil
+}
+
+func (ab *ABStrategy) performInitialHealthChecks(ctx context.Context, request *types.DeploymentCreateRequest,
+	aDeploymentName, bDeploymentName string, status *storage.DeploymentStatus) error {
+	
+	if request.HealthCheckConfig != nil && request.HealthCheckConfig.Enabled {
+		// Check A deployment
+		if err := ab.performHealthCheck(ctx, request.Namespace, aDeploymentName, request.HealthCheckConfig); err != nil {
+			ab.updateStatusWithError(ctx, status, "failed", "health_check_a", err)
+			return err
+		}
+
+		// Check B deployment
+		if err := ab.performHealthCheck(ctx, request.Namespace, bDeploymentName, request.HealthCheckConfig); err != nil {
+			ab.updateStatusWithError(ctx, status, "failed", "health_check_b", err)
+			return err
+		}
+	}
+	return nil
+}
+
+func (ab *ABStrategy) finalizeCreation(status *storage.DeploymentStatus, aDeploymentName, bDeploymentName string) {
+	status.Metadata["a_deployment"] = aDeploymentName
+	status.Metadata["b_deployment"] = bDeploymentName
+	status.Metadata["a_replicas"] = status.Replicas
+	status.Metadata["b_replicas"] = status.Replicas
+	status.Status = "success"
+	status.CurrentPhase = "completed"
+	ab.addEvent(status, "info", "completed", "A/B deployment created successfully")
+}
+
+func (ab *ABStrategy) determineServiceName(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) string {
+	if request.ABConfig != nil && 
+		request.ABConfig.NewServiceName != "" {
+
+		err := ab.CreateService(ctx, request.Namespace, request.Name, request.ABConfig.NewServiceName)
+		if err != nil {
+			ab.logger.Warn("failed to create service during update", zap.Error(err))
+			// Fallback to existing service name if creation fails
+			ab.updateStatusWithError(ctx, status, "failed", "create_service_override",
+				fmt.Errorf("failed to create service %s: %w", request.ABConfig.NewServiceName, err))
+			return status.ServiceName
+		}
+
+		return request.ABConfig.NewServiceName
+	}
+	return status.ServiceName
+}
+
+func (ab *ABStrategy) getDeploymentNames(status *storage.DeploymentStatus) (string, string, error) {
+	aDeployment, aExists := status.Metadata["a_deployment"]
+	bDeployment, bExists := status.Metadata["b_deployment"]
+
+	if !aExists || !bExists {
+		return "", "", fmt.Errorf("deployment names not found in metadata")
+	}
+
+	aName, aOk := aDeployment.(string)
+	bName, bOk := bDeployment.(string)
+
+	if !aOk || !bOk {
+		return "", "", fmt.Errorf("invalid deployment name format in metadata")
+	}
+
+	return aName, bName, nil
+}
+
+func (ab *ABStrategy) updateDeploymentImage(ctx context.Context, request *types.DeploymentUpdateRequest,
+	targetDeployment string, status *storage.DeploymentStatus) error {
+	
+	if err := ab.deploymentMgr.UpdateImage(ctx, request.Namespace, targetDeployment, request.NewImage); err != nil {
+		ab.updateStatusWithError(ctx, status, "failed", "update_image", err)
+		return err
+	}
+
+	if err := ab.kubeClient.WaitForDeploymentReady(ctx, request.Namespace, targetDeployment, 5*time.Minute); err != nil {
+		ab.updateStatusWithError(ctx, status, "failed", "wait_ready", err)
+		return err
+	}
+
+	return nil
+}
+
+func (ab *ABStrategy) updateRoutingConfiguration(ctx context.Context, request *types.DeploymentUpdateRequest,
+	status *storage.DeploymentStatus, serviceName string) error {
+	
+	var routingRules []types.RoutingRule
+
+	// Get existing rules
+	if status.ABConfig != nil && len(status.ABConfig.RoutingRules) > 0 {
+		routingRules = ab.convertStorageRoutingRules(status.ABConfig.RoutingRules)
+	}
+
+	// Override with new rules if provided
+	if request.ABConfig != nil && 
+	   len(request.ABConfig.RoutingRules) > 0 {
+		routingRules = request.ABConfig.RoutingRules
+	}
+
+	if len(routingRules) > 0 {
+		if err := ab.updateIstioRouting(ctx, request.Namespace, serviceName, routingRules); err != nil {
+			ab.updateStatusWithError(ctx, status, "failed", "update_istio", err)
+			return err
+		}
+
+		// Update stored configuration
+		status.ABConfig.RoutingRules = ab.convertRoutingRules(routingRules)
+	}
+
+	return nil
+}
+
+func (ab *ABStrategy) performUpdateHealthCheck(ctx context.Context, request *types.DeploymentUpdateRequest,
+	targetDeployment string, status *storage.DeploymentStatus) error {
+	
+	if request.HealthCheckConfig != nil && request.HealthCheckConfig.Enabled {
+		if err := ab.performHealthCheck(ctx, request.Namespace, targetDeployment, request.HealthCheckConfig); err != nil {
+			ab.updateStatusWithError(ctx, status, "failed", "health_check_update", err)
+			return err
+		}
+	}
+	return nil
+}
+
+func (ab *ABStrategy) finalizeUpdate(status *storage.DeploymentStatus) {
+	status.Status = "success"
+	status.CurrentPhase = "completed"
+	status.EndTime = &[]time.Time{time.Now()}[0]
+	ab.addEvent(status, "info", "completed", "A/B deployment updated successfully")
+}
+
+func (ab *ABStrategy) enrichStatusWithRealTimeData(ctx context.Context, status *storage.DeploymentStatus) error {
+	// Get real-time deployment status
+	aDeploymentName, bDeploymentName, err := ab.getDeploymentNames(status)
+	if err != nil {
+		return err
+	}
+
+	// Check deployment readiness
+	aReady, _ := ab.deploymentMgr.IsDeploymentReady(ctx, status.Namespace, aDeploymentName)
+	bReady, _ := ab.deploymentMgr.IsDeploymentReady(ctx, status.Namespace, bDeploymentName)
+
+	status.Metadata["a_ready"] = aReady
+	status.Metadata["b_ready"] = bReady
+	status.Metadata["last_status_check"] = time.Now()
+
+	return nil
+}
+
+func (ab *ABStrategy) convertRoutingRules(rules []types.RoutingRule) []storage.RoutingRule {
+	result := make([]storage.RoutingRule, len(rules))
+	for i, rule := range rules {
+		result[i] = storage.RoutingRule{
+			HeaderKey:   rule.HeaderKey,
+			HeaderValue: rule.HeaderValue,
+			Variant:     rule.Variant,
+			Weight:      rule.Weight,
+		}
+	}
+	return result
+}
+
+func (ab *ABStrategy) convertStorageRoutingRules(rules []storage.RoutingRule) []types.RoutingRule {
+	result := make([]types.RoutingRule, len(rules))
+	for i, rule := range rules {
+		result[i] = types.RoutingRule{
+			HeaderKey:   rule.HeaderKey,
+			HeaderValue: rule.HeaderValue,
+			Variant:     rule.Variant,
+			Weight:      rule.Weight,
+		}
+	}
+	return result
+}
+
+// Existing helper methods (unchanged but with better error handling)
+
+func (ab *ABStrategy) createDeployment(ctx context.Context, namespace, appname, deploymentName, image string, 
+	replicas int32, variant string, healthCheckConfig *types.HealthCheckConfig) error {
+	
+	Labels := map[string]string{
+		"app":     appname,
+		"variant": variant,
+	}
+
+	if variant == "" {
+		Labels = map[string]string{
+			"app": appname,
+		}
+	}
+
+	container := corev1.Container{
+		Name:  appname,
+		Image: image,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("500m"),
+				corev1.ResourceMemory: resource.MustParse("512Mi"),
+			},
+		},
+	}
+
+	if healthCheckConfig != nil && healthCheckConfig.Enabled {
+		container.LivenessProbe = types.NewKubeProbe(healthCheckConfig.LivenessProbe)
+		container.ReadinessProbe = types.NewKubeProbe(healthCheckConfig.ReadinessProbe)
+	}
+
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deploymentName,
+			Namespace: namespace,
+			Labels:    Labels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: Labels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: Labels,
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{container},
+				},
+			},
+		},
+	}
+
+	if err := ab.kubeClient.CreateDeployment(ctx, deployment); err != nil {
+		return fmt.Errorf("failed to create %s deployment: %w", variant, err)
+	}
+	return ab.kubeClient.WaitForDeploymentReady(ctx, namespace, deploymentName, 5*time.Minute)
+}
+
+func (ab *ABStrategy) setupIstioRouting(ctx context.Context, request *types.DeploymentCreateRequest, serviceName string, subsets []istio.Subset) error {
+	if err := ab.istioMgr.CreateDestinationRule(ctx, request.Namespace, serviceName, subsets); err != nil {
 		return fmt.Errorf("failed to create destination rule: %w", err)
 	}
 
 	routes := make([]istio.Route, len(request.ABConfig.RoutingRules))
 	for i, rule := range request.ABConfig.RoutingRules {
 		routes[i] = istio.Route{
-			Destination: istio.Destination{Host: ServiceName, Subset: rule.Variant},
+			Destination: istio.Destination{Host: serviceName, Subset: rule.Variant},
 			Weight:      rule.Weight,
 			Match:       []istio.Match{{Name: rule.HeaderKey, Exact: rule.HeaderValue}},
 		}
 	}
-	return ab.istioMgr.CreateVirtualService(ctx, request.Namespace, ServiceName, []string{ServiceName}, routes)
+	return ab.istioMgr.CreateVirtualService(ctx, request.Namespace, serviceName, []string{serviceName}, routes)
 }
 
 func (ab *ABStrategy) updateIstioRouting(ctx context.Context, namespace, serviceName string, routingRules []types.RoutingRule) error {
@@ -359,11 +805,14 @@ func (ab *ABStrategy) updateStatusWithError(ctx context.Context, status *storage
 	ab.storage.SaveDeployment(ctx, status)
 }
 
-func(B *ABStrategy) CreateService(ctx context.Context, namespace, appName, serviceName string) error {
+func (ab *ABStrategy) CreateService(ctx context.Context, namespace, appName, serviceName string) error {
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceName,
 			Namespace: namespace,
+			Labels: map[string]string{
+				"app": appName,
+			},
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
@@ -371,14 +820,297 @@ func(B *ABStrategy) CreateService(ctx context.Context, namespace, appName, servi
 			},
 			Ports: []corev1.ServicePort{
 				{
+					Name:       "http",
 					Port:       80,
 					TargetPort: intstr.FromInt(8080),
+					Protocol:   corev1.ProtocolTCP,
 				},
 			},
+			Type: corev1.ServiceTypeClusterIP,
 		},
 	}
-	if _, err := B.ServiceMgr.CreateService(ctx, service); err != nil {
+
+	if _, err := ab.ServiceMgr.CreateService(ctx, service); err != nil {
+		// Check if service already exists
+		if errors.IsAlreadyExists(err) {
+			ab.logger.Info("service already exists, skipping creation", zap.String("service", serviceName))
+			return nil
+		}
 		return fmt.Errorf("failed to create service %s: %w", serviceName, err)
 	}
 	return nil
+}
+
+// Additional advanced management methods
+
+func (ab *ABStrategy) GetVariantMetrics(ctx context.Context, namespace, name, variant string, duration time.Duration) (map[string]interface{}, error) {
+	if variant != "a" && variant != "b" {
+		return nil, fmt.Errorf("invalid variant: %s, must be 'a' or 'b'", variant)
+	}
+
+	deploymentName := fmt.Sprintf("%s-%s", name, variant)
+	
+	// This would integrate with your monitoring system
+	metrics := make(map[string]interface{})
+	
+	// Example metrics (you'd implement actual Prometheus queries here)
+	metrics["deployment_name"] = deploymentName
+	metrics["variant"] = variant
+	metrics["duration"] = duration
+	metrics["timestamp"] = time.Now()
+	
+	// You could add real metrics like:
+	// - Request rate
+	// - Error rate
+	// - Response time
+	// - Resource usage
+	
+	return metrics, nil
+}
+
+func (ab *ABStrategy) CompareVariants(ctx context.Context, namespace, name string, duration time.Duration) (map[string]interface{}, error) {
+	aMetrics, err := ab.GetVariantMetrics(ctx, namespace, name, "a", duration)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get metrics for variant A: %w", err)
+	}
+
+	bMetrics, err := ab.GetVariantMetrics(ctx, namespace, name, "b", duration)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get metrics for variant B: %w", err)
+	}
+
+	comparison := map[string]interface{}{
+		"variant_a": aMetrics,
+		"variant_b": bMetrics,
+		"comparison_duration": duration,
+		"timestamp": time.Now(),
+	}
+
+	return comparison, nil
+}
+
+func (ab *ABStrategy) EnableCanaryMode(ctx context.Context, namespace, name string, canaryPercent int32) error {
+	if canaryPercent < 0 || canaryPercent > 100 {
+		return fmt.Errorf("canary percent must be between 0 and 100")
+	}
+
+	status, err := ab.storage.GetDeploymentByName(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment status: %w", err)
+	}
+
+	// Create canary routing rules
+	canaryRules := []types.RoutingRule{
+		{HeaderKey: "x-canary", HeaderValue: "enabled", Variant: "b", Weight: canaryPercent},
+		{HeaderKey: "x-canary", HeaderValue: "disabled", Variant: "a", Weight: 100 - canaryPercent},
+	}
+
+	serviceName := status.ServiceName
+	if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
+		serviceName = status.ABConfig.ServiceName
+	}
+
+	if err := ab.updateIstioRouting(ctx, namespace, serviceName, canaryRules); err != nil {
+		return fmt.Errorf("failed to enable canary mode: %w", err)
+	}
+
+	// Update configuration
+	status.ABConfig.RoutingRules = ab.convertRoutingRules(canaryRules)
+	status.CurrentPhase = "canary-mode"
+	status.Metadata["canary_percent"] = canaryPercent
+	ab.addEvent(status, "info", "canary-enabled", fmt.Sprintf("Enabled canary mode with %d%% traffic to variant B", canaryPercent))
+
+	return ab.storage.SaveDeployment(ctx, status)
+}
+
+func (ab *ABStrategy) GraduallyShiftTraffic(ctx context.Context, namespace, name string, targetVariant string, 
+	finalWeight int32, steps int32, stepDuration time.Duration) error {
+	
+	if targetVariant != "a" && targetVariant != "b" {
+		return fmt.Errorf("invalid target variant: %s, must be 'a' or 'b'", targetVariant)
+	}
+
+	if finalWeight < 0 || finalWeight > 100 {
+		return fmt.Errorf("final weight must be between 0 and 100")
+	}
+
+	status, err := ab.storage.GetDeploymentByName(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment status: %w", err)
+	}
+
+	// Calculate current weight for target variant
+	currentWeight := int32(0)
+	if status.ABConfig != nil && len(status.ABConfig.RoutingRules) > 0 {
+		for _, rule := range status.ABConfig.RoutingRules {
+			if rule.Variant == targetVariant {
+				currentWeight += rule.Weight
+			}
+		}
+	}
+
+	if steps <= 0 {
+		steps = 5 // Default to 5 steps
+	}
+
+	weightIncrement := (finalWeight - currentWeight) / steps
+	
+	ab.addEvent(status, "info", "gradual-shift-start", 
+		fmt.Sprintf("Starting gradual traffic shift to variant %s from %d%% to %d%% in %d steps", 
+			targetVariant, currentWeight, finalWeight, steps))
+
+
+	oppositeVariant := "a"
+	// Perform gradual shift
+	for i := int32(1); i <= steps; i++ {
+		newWeight := currentWeight + (weightIncrement * i)
+		if i == steps {
+			newWeight = finalWeight // Ensure we reach exactly the final weight
+		}
+
+		if targetVariant == "a" {
+			oppositeVariant = "b"
+		}
+
+		shiftRules := []types.RoutingRule{
+			{HeaderKey: "x-shift", HeaderValue: "target", Variant: targetVariant, Weight: newWeight},
+			{HeaderKey: "x-shift", HeaderValue: "stable", Variant: oppositeVariant, Weight: 100 - newWeight},
+		}
+
+		serviceName := status.ServiceName
+		if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
+			serviceName = status.ABConfig.ServiceName
+		}
+
+		if err := ab.updateIstioRouting(ctx, namespace, serviceName, shiftRules); err != nil {
+			return fmt.Errorf("failed to shift traffic at step %d: %w", i, err)
+		}
+
+		ab.addEvent(status, "info", "gradual-shift-step", 
+			fmt.Sprintf("Step %d/%d: Shifted traffic to %d%% for variant %s", i, steps, newWeight, targetVariant))
+
+		// Wait between steps (except for the last one)
+		if i < steps {
+			time.Sleep(stepDuration)
+		}
+	}
+
+	// Update final configuration
+	finalRules := []types.RoutingRule{
+		{HeaderKey: "x-shift", HeaderValue: "target", Variant: targetVariant, Weight: finalWeight},
+		{HeaderKey: "x-shift", HeaderValue: "stable", Variant: oppositeVariant, Weight: 100 - finalWeight},
+	}
+
+	status.ABConfig.RoutingRules = ab.convertRoutingRules(finalRules)
+	status.CurrentPhase = "traffic-shifted"
+	ab.addEvent(status, "info", "gradual-shift-complete", 
+		fmt.Sprintf("Completed gradual traffic shift: variant %s now receives %d%% traffic", targetVariant, finalWeight))
+
+	return ab.storage.SaveDeployment(ctx, status)
+}
+
+func (ab *ABStrategy) SetMaintenanceMode(ctx context.Context, namespace, name string, enabled bool) error {
+	status, err := ab.storage.GetDeploymentByName(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment status: %w", err)
+	}
+
+	aDeploymentName, bDeploymentName, err := ab.getDeploymentNames(status)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment names: %w", err)
+	}
+
+	if enabled {
+		// Scale down both deployments to 0
+		if err := ab.kubeClient.ScaleDeployment(ctx, namespace, aDeploymentName, 0); err != nil {
+			return fmt.Errorf("failed to scale down A deployment: %w", err)
+		}
+		if err := ab.kubeClient.ScaleDeployment(ctx, namespace, bDeploymentName, 0); err != nil {
+			return fmt.Errorf("failed to scale down B deployment: %w", err)
+		}
+
+		status.CurrentPhase = "maintenance-mode"
+		status.Metadata["maintenance_mode"] = true
+		ab.addEvent(status, "info", "maintenance-enabled", "Maintenance mode enabled - all traffic stopped")
+	} else {
+		// Restore original replica counts
+		aReplicas := int32(1) // Default
+		bReplicas := int32(1) // Default
+
+		if val, ok := status.Metadata["a_replicas"]; ok {
+			if replicas, ok := val.(int32); ok {
+				aReplicas = replicas
+			}
+		}
+		if val, ok := status.Metadata["b_replicas"]; ok {
+			if replicas, ok := val.(int32); ok {
+				bReplicas = replicas
+			}
+		}
+
+		if err := ab.kubeClient.ScaleDeployment(ctx, namespace, aDeploymentName, aReplicas); err != nil {
+			return fmt.Errorf("failed to scale up A deployment: %w", err)
+		}
+		if err := ab.kubeClient.ScaleDeployment(ctx, namespace, bDeploymentName, bReplicas); err != nil {
+			return fmt.Errorf("failed to scale up B deployment: %w", err)
+		}
+
+		status.CurrentPhase = "active"
+		status.Metadata["maintenance_mode"] = false
+		ab.addEvent(status, "info", "maintenance-disabled", "Maintenance mode disabled - traffic restored")
+	}
+
+	return ab.storage.SaveDeployment(ctx, status)
+}
+
+func (ab *ABStrategy) CleanupResources(ctx context.Context, namespace, name string) error {
+	status, err := ab.storage.GetDeploymentByName(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment status: %w", err)
+	}
+
+	aDeploymentName, bDeploymentName, err := ab.getDeploymentNames(status)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment names: %w", err)
+	}
+
+	serviceName := status.ServiceName
+	if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
+		serviceName = status.ABConfig.ServiceName
+	}
+
+	var errors []error
+
+	// Delete deployments
+	if err := ab.kubeClient.DeleteDeployment(ctx, namespace, aDeploymentName); err != nil {
+		errors = append(errors, fmt.Errorf("failed to delete A deployment: %w", err))
+	}
+	if err := ab.kubeClient.DeleteDeployment(ctx, namespace, bDeploymentName); err != nil {
+		errors = append(errors, fmt.Errorf("failed to delete B deployment: %w", err))
+	}
+
+	// Delete Istio resources
+	if err := ab.istioMgr.DeleteVirtualService(ctx, namespace, serviceName); err != nil {
+		errors = append(errors, fmt.Errorf("failed to delete virtual service: %w", err))
+	}
+	if err := ab.istioMgr.DeleteDestinationRule(ctx, namespace, serviceName); err != nil {
+		errors = append(errors, fmt.Errorf("failed to delete destination rule: %w", err))
+	}
+
+	// Delete service (optional - might be shared)
+	if err := ab.ServiceMgr.DeleteService(ctx, namespace, serviceName); err != nil {
+		ab.logger.Warn("failed to delete service (might be shared)", zap.Error(err))
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("cleanup encountered errors: %v", errors)
+	}
+
+	// Update status
+	status.Status = "cleaned-up"
+	status.CurrentPhase = "deleted"
+	status.EndTime = &[]time.Time{time.Now()}[0]
+	ab.addEvent(status, "info", "cleanup", "All resources cleaned up successfully")
+
+	return ab.storage.SaveDeployment(ctx, status)
 }

@@ -68,7 +68,7 @@ func (sm *ServiceManager) SwitchTrafficTo(ctx context.Context, namespace, servic
     // Copy deployment labels to service selector
     for key, value := range deployment.Spec.Template.Labels {
         // Only copy app-related labels, skip system labels
-        if key == "app" || key == "version" || key == "component" {
+        if key == "app" || key == "version" || key == "environment" {
             service.Spec.Selector[key] = value
         }
     }
@@ -131,4 +131,28 @@ func (sm *ServiceManager) SetupService(ctx context.Context, namespace, name stri
         return nil, fmt.Errorf("failed to setup service: %w", err)
     }
     return createdService, nil
+}
+
+
+func(sm *ServiceManager) UpdateServiceSelector(ctx context.Context, namespace, name string, labels map[string]string) (error) {
+    service, err := sm.GetService(ctx, namespace, name)
+    if err != nil {
+        return fmt.Errorf("failed to get service %s/%s: %w", namespace, name, err)
+    }
+    
+    // Update the selector
+    if service.Spec.Selector == nil {
+        service.Spec.Selector = make(map[string]string)
+    }
+    
+    for key, value := range labels {
+        service.Spec.Selector[key] = value
+    }
+    
+    _, err = sm.UpdateService(ctx, service)
+    if err != nil {
+        return fmt.Errorf("failed to update service selector: %w", err)
+    }
+    
+    return err 
 }

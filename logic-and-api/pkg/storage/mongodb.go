@@ -25,26 +25,6 @@ import (
 // 	// Rollback   Rollback  `bson:"rollback"`
 // }
 
-type DeploymentStatus struct {
-    ID           string                 `json:"id"`
-    AppName      string                 `json:"app_name"`
-    Namespace    string                 `json:"namespace"`
-    Status       string                 `json:"status"`       // e.g., "pending", "in-progress", "success", "failed", "rolled-back"
-    CurrentPhase string                 `json:"current_phase"` // e.g., "initializing", "waiting_ready", "progressive_rollout"
-    StartTime    time.Time              `json:"start_time"`
-    EndTime      *time.Time             `json:"end_time"`
-    Error        string                 `json:"error"`        // Error message if failed
-    Metadata     map[string]interface{} `json:"metadata"`     // Additional data (e.g., canary_config, current_traffic_percent)
-    Events       []DeploymentEvent      `json:"events"`
-}
-
-type DeploymentEvent struct {
-    Timestamp time.Time `json:"timestamp"`
-    Phase     string    `json:"phase"`     // e.g., "initializing", "progressive_rollout"
-    Message   string    `json:"message"`   // e.g., "Starting canary deployment"
-    Level     string    `json:"level"`     // e.g., "info", "error"
-}
-
 // Leave empty for now, we can add fields later
 // type Rollback struct {}
 
