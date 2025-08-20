@@ -2,7 +2,6 @@
 package types
 
 import (
-	"context"
 	"time"
 )
 
@@ -12,15 +11,15 @@ type DeploymentCreateRequest struct {
 	Name              string            `json:"name" validate:"required"`
 	Image             string            `json:"image" validate:"required"`
 	Replicas          int32             `json:"replicas" validate:"required,min=1"`
-	ServiceName       string           	`json:"service_name" validate:"required"`
+	ServiceConfig    *ServiceConfig     `json:"service_config" validate:"required"`
 	Strategy          string            `json:"strategy" validate:"required"`
+	Port              int32             `json:"port" validate:"required"`
 
 
 	//Configs for different strategies
 	BlueGreenConfig   *BlueGreenConfig  `json:"blueGreenConfig,omitempty" validate:"required_if=Strategy blue-green"`
 	CanaryConfig      *CanaryConfig     `json:"canaryConfig,omitempty" validate:"required_if=Strategy canary"`
 	ABConfig          *ABConfig         `json:"abConfig,omitempty" validate:"required_if=Strategy ab"`
-	FeatureFlagConfig *FeatureFlagConfig `json:"featureFlagConfig,omitempty" validate:"required_if=Strategy feature-flag"`
 	HealthCheckConfig *HealthCheckConfig `json:"healthCheckConfig,omitempty"`
 }
 
@@ -36,19 +35,24 @@ type DeploymentUpdateRequest struct {
 	ABConfig          *ABConfig         `json:"abConfig,omitempty"`
 	CanaryConfig    *CanaryConfig    `json:"canaryConfig,omitempty"`
 	BlueGreenConfig   *BlueGreenConfig   `json:"BlueGreenConfig,omitempty"`
-	FeatureFlagConfig *FeatureFlagConfig `json:"featureFlagConfig,omitempty" validate:"required_if=Strategy feature-flag"`
 }
 
 // StrategyOverride allows overriding the strategy for updates
-type StrategyOverride struct {
-	Strategy        string           `json:"strategy" validate:"required"`
-	BlueGreenConfig *BlueGreenConfig `json:"blueGreenConfig,omitempty" validate:"required_if=Strategy blue-green"`
-	CanaryConfig    *CanaryConfig    `json:"canaryConfig,omitempty" validate:"required_if=Strategy canary"`
-	ABConfig          *ABConfig         `json:"abConfig,omitempty" validate:"required_if=Strategy ab"`
-	FeatureFlagConfig *FeatureFlagConfig `json:"featureFlagConfig,omitempty" validate:"required_if=Strategy feature-flag"`
+// type StrategyOverride struct {
+// 	Strategy        string           `json:"strategy" validate:"required"`
+// 	BlueGreenConfig *BlueGreenConfig `json:"blueGreenConfig,omitempty" validate:"required_if=Strategy blue-green"`
+// 	CanaryConfig    *CanaryConfig    `json:"canaryConfig,omitempty" validate:"required_if=Strategy canary"`
+// 	ABConfig          *ABConfig         `json:"abConfig,omitempty" validate:"required_if=Strategy ab"`
+// }
+
+
+type ServiceConfig struct {
+	Name     string `json:"name"`
+	Port     int32  `json:"port"`
+	Type     string  `json:"type"` // ClusterIP, NodePort, LoadBalancer, ExternalName
+
+	ExternalName string `json:"external_name"` //optional only needed for external deployments
 }
-
-
 
 // DeploymentStatus represents the current state of a deployment
 type DeploymentStatus struct {
@@ -116,13 +120,13 @@ type MetricResult struct {
 }
 
 // DeploymentStrategy defines the interface for deployment strategies
-type DeploymentStrategy interface {
-	Name() string
-	Validate(request *DeploymentRequest) error
-	Deploy(ctx context.Context, request *DeploymentRequest) (*DeploymentStatus, error)
-	Rollback(ctx context.Context, request *RollbackRequest) error
-	// GetStatus(ctx context.Context, namespace, name string) (*DeploymentStatus, error)
-}
+// type DeploymentStrategy interface {
+// 	Name() string
+// 	Validate(request *DeploymentRequest) error
+// 	Deploy(ctx context.Context, request *DeploymentRequest) (*DeploymentStatus, error)
+// 	Rollback(ctx context.Context, request *RollbackRequest) error
+// 	// GetStatus(ctx context.Context, namespace, name string) (*DeploymentStatus, error)
+// }
 
 // // pkg/types/deployment.go
 // package types
@@ -133,18 +137,18 @@ type DeploymentStrategy interface {
 // )
 
 // // DeploymentRequest represents the request for creating or updating a deployment
-type DeploymentRequest struct {
-	Namespace         string            `json:"namespace" validate:"required"`
-	AppName           string            `json:"name" validate:"required"`
-	Image             string            `json:"image" validate:"required"`
-	NewImage          string            `json:"new_image"`
-	Replicas          int32              `json:"replicas" validate:"required,min=1"`
-	Strategy          string            `json:"strategy" validate:"required,oneof=blue-green canary"`
-	BlueGreenConfig   *BlueGreenConfig  `json:"blueGreenConfig,omitempty" validate:"required_if=Strategy blue-green"`
-	CanaryConfig      *CanaryConfig     `json:"canaryConfig,omitempty" validate:"required_if=Strategy canary"`
-	StrategyOverride  *StrategyOverride `json:"strategyOverride,omitempty"` // For updates only
-	HealthCheckConfig *HealthCheckConfig `json:"healthCheckConfig,omitempty"`
-}
+// type DeploymentRequest struct {
+// 	Namespace         string            `json:"namespace" validate:"required"`
+// 	AppName           string            `json:"name" validate:"required"`
+// 	Image             string            `json:"image" validate:"required"`
+// 	NewImage          string            `json:"new_image"`
+// 	Replicas          int32              `json:"replicas" validate:"required,min=1"`
+// 	Strategy          string            `json:"strategy" validate:"required,oneof=blue-green canary"`
+// 	BlueGreenConfig   *BlueGreenConfig  `json:"blueGreenConfig,omitempty" validate:"required_if=Strategy blue-green"`
+// 	CanaryConfig      *CanaryConfig     `json:"canaryConfig,omitempty" validate:"required_if=Strategy canary"`
+// 	// StrategyOverride  *StrategyOverride `json:"strategyOverride,omitempty"` // For updates only
+// 	HealthCheckConfig *HealthCheckConfig `json:"healthCheckConfig,omitempty"`
+// }
 
 // // StrategyOverride allows overriding the strategy for updates
 // type StrategyOverride struct {

@@ -71,7 +71,7 @@ func (bg *BlueGreenStrategy) Validate(request *types.DeploymentCreateRequest) er
 	if request.BlueGreenConfig == nil {
 		return fmt.Errorf("blueGreenConfig is required for blue-green strategy")
 	}
-	if request.ServiceName == "" {
+	if request.ServiceConfig == nil {
 		return fmt.Errorf("serviceName is required in blueGreenConfig")
 	}
 	if request.BlueGreenConfig.ActiveEnvironment != "blue" && request.BlueGreenConfig.ActiveEnvironment != "green" {
@@ -92,7 +92,7 @@ func (bg *BlueGreenStrategy) CreateBlueGreenDeployment(ctx context.Context, requ
 		ID:           deploymentID,
 		Namespace:    request.Namespace,
 		Strategy:     request.Strategy,
-		ServiceName: request.ServiceName,
+		ServiceConfig: request.ServiceConfig,
 		Replicas:    request.Replicas,
 		AppName:       request.Name,
 		Image:        request.Image,
@@ -181,13 +181,13 @@ func (bg *BlueGreenStrategy) CreateBlueGreenDeployment(ctx context.Context, requ
 		"app": request.Name,
 	}
 
-	_, err = bg.serviceMgr.SetupService(ctx, request.Namespace, request.ServiceName, activeLabels)
-	if err != nil {
+	if err := bg.CreateService(ctx, request.Namespace, request.Name, request.ServiceConfig.ExternalName, request.Port,
+	request.ServiceConfig, activeLabels); err != nil {
 		bg.updateStatusWithError(ctx, status, "failed", "setup_service", err)
 		return status, err
 	}
 
-	status.ServiceName = request.ServiceName
+	status.ServiceConfig = request.ServiceConfig
 	status.BlueGreenConfig.ActiveEnvironment = activeEnvironment
 	status.BlueGreenConfig.TargetEnvironment = targetEnvironment
 
@@ -212,14 +212,17 @@ func (bg *BlueGreenStrategy) UpdateBlueGreenDeployment(ctx context.Context, requ
 		replicas = status.Replicas
 	}
 
-	serviceName := status.ServiceName
+	serviceConf := status.ServiceConfig
+	serviceName := serviceConf.Name
 
-	if request.BlueGreenConfig.NewServiceName != ""{
-		serviceName = request.BlueGreenConfig.NewServiceName
+	if request.BlueGreenConfig.ServiceConfig != nil && request.BlueGreenConfig.ServiceConfig.Name != ""{
+		serviceConf = request.BlueGreenConfig.ServiceConfig
+		serviceName = serviceConf.Name
 
 		if _, err := bg.serviceMgr.GetService(ctx, request.Namespace, serviceName); err != nil{
 			labels := map[string]string{"app": request.Name, "environment":status.BlueGreenConfig.TargetDeploymentName}
-			if err = bg.CreateService(ctx, request.Namespace, request.Name, serviceName, labels); err != nil{
+			if err = bg.CreateService(ctx, request.Namespace, request.Name, serviceName, 
+				status.Port, serviceConf, labels); err != nil{
 				bg.updateStatusWithError(ctx, status, "failed to create new service", "upate deployment", err)
 				return nil, err
 			}
@@ -230,7 +233,7 @@ func (bg *BlueGreenStrategy) UpdateBlueGreenDeployment(ctx context.Context, requ
 	targetDeployment := status.BlueGreenConfig.TargetDeploymentName
 	targetEnvironment := status.BlueGreenConfig.TargetEnvironment
 	activeEnviroment := status.BlueGreenConfig.ActiveEnvironment
-
+	
 	
 	status.CurrentPhase = "updating"
 	status.Status = "in-progress"
@@ -283,6 +286,7 @@ func (bg *BlueGreenStrategy) UpdateBlueGreenDeployment(ctx context.Context, requ
 	status.BlueGreenConfig.ActiveEnvironment = targetEnvironment
 	status.BlueGreenConfig.TargetEnvironment = activeEnviroment
 
+	status.ServiceConfig = serviceConf
 	status.Status = "success"
 	status.CurrentPhase = "completed"
 	status.EndTime = &[]time.Time{time.Now()}[0]
@@ -397,7 +401,7 @@ func (bg *BlueGreenStrategy) Rollback(ctx context.Context, deploymentName string
 	activeEnviroment := status.BlueGreenConfig.ActiveEnvironment
 
 	namespace := status.Namespace
-	serviceName := status.ServiceName
+	serviceName := status.ServiceConfig.Name
 
 	if err := bg.serviceMgr.SwitchTrafficTo(ctx, namespace, serviceName, targetDeployment); err != nil {
 		return fmt.Errorf("failed to rollback: %w", err)
@@ -437,35 +441,58 @@ func (bg *BlueGreenStrategy) monitorDeployment(ctx context.Context, request *typ
 	return nil
 }
 
-func (b *BlueGreenStrategy) CreateService(ctx context.Context, namespace, appName, serviceName string, labels map[string]string) error {
-	
+func (b *BlueGreenStrategy) CreateService(ctx context.Context, namespace, name, serviceName string, appPort int32,
+	serviceConf *types.ServiceConfig, labels map[string]string) error {
+
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceName,
 			Namespace: namespace,
-			Labels: labels,
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: labels,
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "http",
-					Port:       80,
-					TargetPort: intstr.FromInt(8080),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
-			Type: corev1.ServiceTypeClusterIP,
+			Labels:    labels,
 		},
 	}
 
+	if serviceConf.Type != "ExternalName" {
+		service.Spec = corev1.ServiceSpec{
+			Selector: labels,
+			Ports: []corev1.ServicePort{
+				{
+					Protocol:   corev1.ProtocolTCP,
+					Port:       serviceConf.Port,
+					TargetPort: intstr.FromInt32(appPort),
+				},
+			},
+		}
+	}
+
+	switch serviceConf.Type {
+	case "ClusterIP":
+		service.Spec.Type = corev1.ServiceTypeClusterIP
+
+	case "NodePort":
+		service.Spec.Type = corev1.ServiceTypeNodePort
+
+	case "LoadBalancer":
+		service.Spec.Type = corev1.ServiceTypeLoadBalancer
+
+	case "ExternalName":
+		service.Spec.Type = corev1.ServiceTypeExternalName
+		service.Spec.ExternalName = serviceConf.ExternalName
+
+	default:
+		return fmt.Errorf("unsupported service type: %s", serviceConf.Type)
+	}
+
 	if _, err := b.serviceMgr.CreateService(ctx, service); err != nil {
-		// Check if service already exists
 		if errors.IsAlreadyExists(err) {
-			b.logger.Info("service already exists, skipping creation", zap.String("service", serviceName))
+			b.logger.Info("service already exists, skipping creation", zap.String("service", serviceConf.Name))
 			return nil
 		}
-		return fmt.Errorf("failed to create service %s: %w", serviceName, err)
+		b.logger.Error("An error occurred while creating service", zap.Error(err))
+		return fmt.Errorf("error occurred while trying to create service: %w", err)
 	}
+
+	b.logger.Info("Service created successfully", zap.String("name", name), zap.String("type", string(service.Spec.Type)))
+
 	return nil
 }

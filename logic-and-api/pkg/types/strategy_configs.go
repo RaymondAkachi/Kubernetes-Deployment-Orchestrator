@@ -6,14 +6,16 @@ import (
 
 // BlueGreenConfig defines configuration for blue-green deployments
 type BlueGreenConfig struct {
-	NewServiceName  string   `json:"Newservice"`
+	ServiceConfig        *ServiceConfig  `json:"service_config"`
 	ActiveEnvironment string `json:"activeEnvironment" validate:"required,oneof=blue green"`
 	HealthCheck       string `json:"healthCheck,omitempty"`
 }
 
 // CanaryConfig defines configuration for canary deployments
 type CanaryConfig struct {
-	NewServiceName  string        `json:"Newservice"`
+	// NewServiceName  string        `json:"Newservice"`
+	HealthCheck       string `json:"healthCheck,omitempty"`
+	ServiceConfig        *ServiceConfig  `json:"service_config"`
     TrafficIncrement      int32           `json:"traffic_increment" yaml:"traffic_increment"`
     StepDuration          time.Duration `json:"step_duration" yaml:"step_duration"`
 	InitialTrafficPercent int32       `json:"initialTrafficPercent" validate:"required,min=1,max=100"`
@@ -32,7 +34,7 @@ type TrafficStep struct {
 
 // ABConfig defines configuration for A/B deployments
 type ABConfig struct {
-	NewServiceName  string        `json:"Newservice"`
+	ServiceConfig        *ServiceConfig  `json:"service_config"`
 	RoutingRules []RoutingRule `json:"routingRules" validate:"required,dive"`
 	HealthCheck  string        `json:"healthCheck,omitempty"`
 
@@ -48,12 +50,3 @@ type RoutingRule struct {
 	Weight      int32    `json:"weight" validate:"required,min=0,max=100"`
 }
 
-// FeatureFlagConfig defines configuration for feature-flag deployments
-type FeatureFlagConfig struct {
-	NewServiceName  string        `json:"Newservice"`
-	ConfigMapName string            `json:"configMapName" validate:"required"`
-	Flags         map[string]string `json:"flags" validate:"required"`
-	RolloutPercent int32               `json:"rolloutPercent" validate:"required,min=0,max=100"`
-	HealthCheck   string            `json:"healthCheck,omitempty"`
-	MountPath   string            `json:"mountPath,omitempty"` // Path where the config map will be mounted
-}

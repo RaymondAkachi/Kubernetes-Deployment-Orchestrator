@@ -54,15 +54,6 @@ func (c *CanaryStrategy) Name() string {
 	return "canary"
 }
 
-func (c *CanaryStrategy) Validate(request *types.DeploymentRequest) error {
-	// Validation code remains the same as previous
-	return nil
-}
-
-func (c *CanaryStrategy) Deploy(ctx context.Context, request *types.DeploymentRequest) (*storage.DeploymentStatus, error) {
-	// This method can be deprecated or used as a wrapper; direct calls to Create or Update are preferred
-	return nil, fmt.Errorf("use CreateCanaryDeployment or UpdateCanaryDeployment")
-}
 
 func (c *CanaryStrategy) CreateCanaryDeployment(ctx context.Context, request *types.DeploymentCreateRequest) (*storage.DeploymentStatus, error) {
 	deploymentID := uuid.New().String()
@@ -71,7 +62,7 @@ func (c *CanaryStrategy) CreateCanaryDeployment(ctx context.Context, request *ty
 		ID:           deploymentID,
 		Namespace:    request.Namespace,
 		Strategy:     request.Strategy,
-		ServiceName: request.ServiceName,
+		ServiceConfig: request.ServiceConfig,
 		Replicas:    request.Replicas,
 		AppName:       request.Name,
 		Image:        request.Image,
@@ -110,13 +101,15 @@ func (c *CanaryStrategy) CreateCanaryDeployment(ctx context.Context, request *ty
 		return status, err
 	}
 
-	serviceName := request.ServiceName
+	serviceName := request.ServiceConfig.Name
 	if serviceName == "" {
 		serviceName = fmt.Sprintf("%s-service", request.Name)
 	}
 
 	//Create canary app service
-	if err := c.createService(ctx, request.Namespace, request.Name, serviceName); err != nil {
+	labels := map[string]string{"app": request.Name}
+	if err := c.CreateService(ctx, request.Namespace, request.Name, serviceName, request.Port,
+		request.ServiceConfig, labels); err != nil {
 		c.updateStatusWithError(ctx, status, "failed", "create_service", err)
 		return status, err
 	}
@@ -267,7 +260,7 @@ func (c *CanaryStrategy) UpdateCanaryDeployment(ctx context.Context, request *ty
 		c.addEvent(status, "info", phase.name, fmt.Sprintf("Starting %s phase", phase.name))
 		if err := phase.fn(ctx, request, canaryDeploymentName, status, config); err != nil {
 			c.updateStatusWithError(ctx, status, "failed", phase.name, err)
-			c.cleanupCanary(ctx, request.Namespace, status.ServiceName, canaryDeploymentName)
+			c.cleanupCanary(ctx, request.Namespace, status.ServiceConfig.Name, canaryDeploymentName, status)
 			return status, err
 		}
 		c.storage.SaveDeployment(ctx, status)
@@ -301,14 +294,19 @@ func (c *CanaryStrategy) prepareCanaryUpdate(ctx context.Context, request *types
 		healthCheck = status.HealthCheck
 	}
 
-	serviceName := status.ServiceName
-	if request.CanaryConfig.NewServiceName != ""{
-		serviceName = request.CanaryConfig.NewServiceName
+	serviceConf := status.ServiceConfig
+	// serviceName := serviceConf.Name
+	if request.CanaryConfig.ServiceConfig != nil && request.CanaryConfig.ServiceConfig.Name != ""{
+		// serviceName = request.CanaryConfig.ServiceConfig.Name
+		serviceConf = request.CanaryConfig.ServiceConfig
 	}
 
-	_, err := c.ServiceMgr.GetService(ctx, request.Namespace, serviceName)
+	_, err := c.ServiceMgr.GetService(ctx, request.Namespace, serviceConf.Name)
 	if err != nil && errors.IsNotFound(err) {
-		if err = c.createCanaryService(ctx, request.Namespace, serviceName, request.Name); err != nil{
+		labels := map[string]string{"app":request.Name}
+		if err = c.CreateService(ctx, request.Namespace, request.Name, serviceConf.Name, status.Port,
+			serviceConf, labels); err != nil{
+
 			c.updateStatusWithError(ctx, status, "failed", "new service creation failed", err)
 			return err
 		}
@@ -332,11 +330,12 @@ func (c *CanaryStrategy) prepareCanaryUpdate(ctx context.Context, request *types
 	}
 
 	weights := map[string]int{"stable": 100 - int(config.InitialTrafficPercent), "canary": int(config.InitialTrafficPercent)}
-	if err := c.istioMgr.UpdateVirtualServiceWeights(ctx, request.Namespace, serviceName, weights); err != nil {
+	if err := c.istioMgr.UpdateVirtualServiceWeights(ctx, request.Namespace, serviceConf.Name, weights); err != nil {
 		return fmt.Errorf("failed to set initial weights: %w", err)
 	}
 	
-	status.ServiceName = serviceName
+	status.CanaryConfig.CanaryImage = request.NewImage
+	status.ServiceConfig = serviceConf
 	status.CanaryConfig.CanaryWeight = config.InitialTrafficPercent
 	if err := c.storage.SaveDeployment(ctx, status); err != nil {
 		c.updateStatusWithError(ctx, status, "failed", "failed to save deployment status", err)
@@ -347,7 +346,7 @@ func (c *CanaryStrategy) prepareCanaryUpdate(ctx context.Context, request *types
 }
 
 
-func (c *CanaryStrategy) cleanupCanary(ctx context.Context, namespace, serviceName, canaryDeployment string) {
+func (c *CanaryStrategy) cleanupCanary(ctx context.Context, namespace, serviceName, canaryDeployment string, status *storage.DeploymentStatus) {
 	weights := map[string]int{"stable": 100, "canary": 0}
 	if err := c.istioMgr.UpdateVirtualServiceWeights(ctx, namespace, serviceName, weights); err != nil {
 		c.logger.Warn("failed to reset weights during cleanup", zap.Error(err))
@@ -355,6 +354,7 @@ func (c *CanaryStrategy) cleanupCanary(ctx context.Context, namespace, serviceNa
 	if err := c.kubeClient.ScaleDeployment(ctx, namespace, canaryDeployment, 0); err != nil {
 		c.logger.Warn("failed to scale down canary during cleanup", zap.Error(err))
 	}
+	status.CanaryConfig.CanaryWeight = 0
 }
 
 func (c *CanaryStrategy) promoteCanaryUpdate(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) error {
@@ -366,7 +366,7 @@ func (c *CanaryStrategy) promoteCanaryUpdate(ctx context.Context, request *types
 	}
 
 	weights := map[string]int{"stable": 100, "canary": 0}
-	if err := c.istioMgr.UpdateVirtualServiceWeights(ctx, request.Namespace, status.ServiceName, weights); err != nil {
+	if err := c.istioMgr.UpdateVirtualServiceWeights(ctx, request.Namespace, status.ServiceConfig.Name, weights); err != nil {
 		return fmt.Errorf("failed to reset weights: %w", err)
 	}
 
@@ -395,7 +395,7 @@ func (c *CanaryStrategy) Rollback(ctx context.Context, deploymentName string) er
 		return fmt.Errorf("failed to get deployment status: %w", err)
 	}
 
-	c.cleanupCanary(ctx, status.Namespace, status.ServiceName, status.CanaryConfig.CanaryDeploymentName)
+	c.cleanupCanary(ctx, status.Namespace, status.ServiceConfig.Name, status.CanaryConfig.CanaryDeploymentName, status)
 
 	status.Status = "rolled-back"
 	status.EndTime = &[]time.Time{time.Now()}[0]
@@ -426,32 +426,59 @@ func (c *CanaryStrategy) updateStatusWithError(ctx context.Context, status *stor
 	c.storage.SaveDeployment(ctx, status)
 }
 
-func (c *CanaryStrategy) createService(ctx context.Context, namespace, appName, serviceName string) error {
+func (c *CanaryStrategy) CreateService(ctx context.Context, namespace, name, serviceName string, appPort int32,
+	serviceConf *types.ServiceConfig, labels map[string]string) error {
+
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceName,
 			Namespace: namespace,
-		},
-		Spec: corev1.ServiceSpec{
-			// This selector matches all pods of the application, regardless of version
-			Selector: map[string]string{
-				"app": appName,
-			},
-			Ports: []corev1.ServicePort{
-				{
-					Protocol:   corev1.ProtocolTCP,
-					Port:       80,
-					TargetPort: intstr.FromInt(8080),
-				},
-			},
-			Type: corev1.ServiceTypeClusterIP,
+			Labels:    labels,
 		},
 	}
 
-	_, err := c.ServiceMgr.CreateService(ctx, service)
-	if err != nil {
-		return fmt.Errorf("failed to create service %s: %w", appName, err)
+	if serviceConf.Type != "ExternalName" {
+		service.Spec = corev1.ServiceSpec{
+			Selector: labels,
+			Ports: []corev1.ServicePort{
+				{
+					Protocol:   corev1.ProtocolTCP,
+					Port:       serviceConf.Port,
+					TargetPort: intstr.FromInt32(appPort),
+				},
+			},
+		}
 	}
+
+	switch serviceConf.Type {
+	case "ClusterIP":
+		service.Spec.Type = corev1.ServiceTypeClusterIP
+
+	case "NodePort":
+		service.Spec.Type = corev1.ServiceTypeNodePort
+
+	case "LoadBalancer":
+		service.Spec.Type = corev1.ServiceTypeLoadBalancer
+
+	case "ExternalName":
+		service.Spec.Type = corev1.ServiceTypeExternalName
+		service.Spec.ExternalName = serviceConf.ExternalName
+
+	default:
+		return fmt.Errorf("unsupported service type: %s", serviceConf.Type)
+	}
+
+	if _, err := c.ServiceMgr.CreateService(ctx, service); err != nil {
+		if errors.IsAlreadyExists(err) {
+			c.logger.Info("service already exists, skipping creation", zap.String("service", serviceConf.Name))
+			return nil
+		}
+		c.logger.Error("An error occurred while creating service", zap.Error(err))
+		return fmt.Errorf("error occurred while trying to create service: %w", err)
+	}
+
+	c.logger.Info("Service created successfully", zap.String("name", name), zap.String("type", string(service.Spec.Type)))
+
 	return nil
 }
 
@@ -486,7 +513,7 @@ func (c *CanaryStrategy) performInitialHealthCheck(ctx context.Context, request 
 func (c *CanaryStrategy) executeProgressiveRollout(ctx context.Context, request *types.DeploymentUpdateRequest, 
 	canaryName string, status *storage.DeploymentStatus, config *types.CanaryConfig) error {
 
-	servicename := status.ServiceName
+	servicename := status.ServiceConfig.Name
 
 	health := status.HealthCheck
 	if request.HealthCheckConfig != nil{
@@ -546,35 +573,35 @@ func (c *CanaryStrategy) waitAndCheckHealth(ctx context.Context, request *types.
 	}
 }
 
-func (c *CanaryStrategy) createCanaryService(ctx context.Context, namespace, serviceName, appName string) (error) {
-	service_data := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      serviceName,
-			Namespace: namespace,
-		},
-		Spec: corev1.ServiceSpec{
-			// This selector matches all pods of the application, regardless of version
-			Selector: map[string]string{
-				"app": appName,
-			},
-			Ports: []corev1.ServicePort{
-				{
-					Protocol:   corev1.ProtocolTCP,
-					Port:       80,
-					TargetPort: intstr.FromInt(8080),
-				},
-			},
-			Type: corev1.ServiceTypeClusterIP,
-		},
-	}
+// func (c *CanaryStrategy) createCanaryService(ctx context.Context, namespace, serviceName, appName string) (error) {
+// 	service_data := &corev1.Service{
+// 		ObjectMeta: metav1.ObjectMeta{
+// 			Name:      serviceName,
+// 			Namespace: namespace,
+// 		},
+// 		Spec: corev1.ServiceSpec{
+// 			// This selector matches all pods of the application, regardless of version
+// 			Selector: map[string]string{
+// 				"app": appName,
+// 			},
+// 			Ports: []corev1.ServicePort{
+// 				{
+// 					Protocol:   corev1.ProtocolTCP,
+// 					Port:       80,
+// 					TargetPort: intstr.FromInt(8080),
+// 				},
+// 			},
+// 			Type: corev1.ServiceTypeClusterIP,
+// 		},
+// 	}
 
-	_, err :=  c.ServiceMgr.CreateService(ctx, service_data)
-	if err != nil{
-		return fmt.Errorf("failed to create service named %s", serviceName)
-	}
+// 	_, err :=  c.ServiceMgr.CreateService(ctx, service_data)
+// 	if err != nil{
+// 		return fmt.Errorf("failed to create service named %s", serviceName)
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
 // func (c *CanaryStrategy) promoteCanary(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) error {
 // 	stable_dep := status.Metadata["stable_deployment"].(string)

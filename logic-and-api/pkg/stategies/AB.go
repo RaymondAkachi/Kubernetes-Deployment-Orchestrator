@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	// "github.com/prometheus/client_golang/prometheus/internal"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -66,7 +67,8 @@ func (ab *ABStrategy) Create(ctx context.Context, request *types.DeploymentCreat
 		ID:           deploymentID,
 		Namespace:    request.Namespace,
 		Replicas:     request.Replicas,
-		ServiceName:  request.ServiceName,
+		ServiceConfig:  request.ServiceConfig,
+		Port:          request.Port,
 		Strategy:     request.Strategy,
 		AppName:      request.Name,
 		Image:        request.Image,
@@ -79,7 +81,7 @@ func (ab *ABStrategy) Create(ctx context.Context, request *types.DeploymentCreat
 
 	// Store AB configuration in metadata with proper structure
 	status.ABConfig = &storage.ABConfig{
-		ServiceName:  request.ServiceName,
+		ServiceName:  request.ServiceConfig.Name,
 		RoutingRules: ab.convertRoutingRules(request.ABConfig.RoutingRules),
 		HealthCheck:  request.ABConfig.HealthCheck,
 	}
@@ -104,7 +106,7 @@ func (ab *ABStrategy) Create(ctx context.Context, request *types.DeploymentCreat
 		return status, err
 	}
 
-	serviceName := ab.getServiceName(request.ServiceName, request.Name)
+	serviceName := ab.getServiceName(request.ServiceConfig.Name, request.Name)
 
 	if err := ab.createOrUpdateService(ctx, request.Namespace, request.Name, serviceName, status); err != nil {
 		return status, err
@@ -136,7 +138,8 @@ func (ab *ABStrategy) Update(ctx context.Context, request *types.DeploymentUpdat
 	ab.addEvent(status, "info", "updating", "Starting A/B deployment update")
 
 	// Determine service name
-	serviceName := ab.determineServiceName(ctx, request, status)
+	serviceConf := ab.determineServiceName(ctx, request, status)
+	serviceName := serviceConf.Name
 
 	// Get deployment names from metadata with validation
 	aDeploymentName, bDeploymentName, err := ab.getDeploymentNames(status)
@@ -172,7 +175,7 @@ func (ab *ABStrategy) Update(ctx context.Context, request *types.DeploymentUpdat
 	status.Metadata["last_update"] = time.Now().Format(time.RFC3339)
 	status.Metadata["updated_deployment"] = targetDeployment
 	status.Image = request.NewImage
-	status.ServiceName = serviceName
+	status.ServiceConfig = serviceConf
 	ab.finalizeUpdate(status)
 	return status, ab.storage.SaveDeployment(ctx, status)
 }
@@ -188,7 +191,7 @@ func (ab *ABStrategy) Rollback(ctx context.Context, request *types.RollbackReque
 	ab.addEvent(status, "info", "rollback", fmt.Sprintf("Starting rollback: %s", request.Reason))
 
 	// Get service name and deployment names
-	serviceName := status.ServiceName
+	serviceName := status.ServiceConfig.Name
 	if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
 		serviceName = status.ABConfig.ServiceName
 	}
@@ -247,7 +250,7 @@ func (ab *ABStrategy) SwitchTraffic(ctx context.Context, namespace, name string,
 		return fmt.Errorf("invalid routing rules: %w", err)
 	}
 
-	serviceName := status.ServiceName
+	serviceName := status.ServiceConfig.Name
 	if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
 		serviceName = status.ABConfig.ServiceName
 	}
@@ -340,7 +343,7 @@ func (ab *ABStrategy) PromoteVariant(ctx context.Context, namespace, name, varia
 		HeaderKey: "x-deployment", HeaderValue: "deprecated", Variant: oppositeVariant, Weight: 0,
 	})
 
-	serviceName := status.ServiceName
+	serviceName := status.ServiceConfig.Name
 	if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
 		serviceName = status.ABConfig.ServiceName
 	}
@@ -398,7 +401,7 @@ func (ab *ABStrategy) validateCreateRequest(request *types.DeploymentCreateReque
 	if request.ABConfig == nil {
 		return fmt.Errorf("abConfig is required for A/B strategy")
 	}
-	if request.ServiceName == "" {
+	if request.ServiceConfig == nil {
 		return fmt.Errorf("serviceName is required")
 	}
 
@@ -491,7 +494,8 @@ func (ab *ABStrategy) getServiceName(requestServiceName, appName string) string 
 func (ab *ABStrategy) createOrUpdateService(ctx context.Context, namespace, appName, serviceName string, 
 	status *storage.DeploymentStatus) error {
 	
-	if err := ab.CreateService(ctx, namespace, appName, serviceName); err != nil {
+	labels := map[string]string{"app": appName}
+	if err := ab.CreateService(ctx, namespace, appName, serviceName,  status.Port, status.ServiceConfig, labels); err != nil {
 		ab.updateStatusWithError(ctx, status, "failed", fmt.Sprintf("create_service_%s", serviceName), err)
 		return err
 	}
@@ -542,22 +546,25 @@ func (ab *ABStrategy) finalizeCreation(status *storage.DeploymentStatus, aDeploy
 	ab.addEvent(status, "info", "completed", "A/B deployment created successfully")
 }
 
-func (ab *ABStrategy) determineServiceName(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) string {
+func (ab *ABStrategy) determineServiceName(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) *types.ServiceConfig {
 	if request.ABConfig != nil && 
-		request.ABConfig.NewServiceName != "" {
+		request.ABConfig.ServiceConfig != nil {
+		
+		labels := map[string]string{"app": request.Name}
+		err := ab.CreateService(ctx, request.Namespace, request.Name, request.ABConfig.ServiceConfig.Name, 
+			status.Port, request.ABConfig.ServiceConfig, labels)
 
-		err := ab.CreateService(ctx, request.Namespace, request.Name, request.ABConfig.NewServiceName)
 		if err != nil {
 			ab.logger.Warn("failed to create service during update", zap.Error(err))
 			// Fallback to existing service name if creation fails
 			ab.updateStatusWithError(ctx, status, "failed", "create_service_override",
-				fmt.Errorf("failed to create service %s: %w", request.ABConfig.NewServiceName, err))
-			return status.ServiceName
+				fmt.Errorf("failed to create service %s: %w", request.ABConfig.ServiceConfig.Name, err))
+			return status.ServiceConfig
 		}
 
-		return request.ABConfig.NewServiceName
+		return request.ABConfig.ServiceConfig
 	}
-	return status.ServiceName
+	return status.ServiceConfig
 }
 
 func (ab *ABStrategy) getDeploymentNames(status *storage.DeploymentStatus) (string, string, error) {
@@ -805,41 +812,41 @@ func (ab *ABStrategy) updateStatusWithError(ctx context.Context, status *storage
 	ab.storage.SaveDeployment(ctx, status)
 }
 
-func (ab *ABStrategy) CreateService(ctx context.Context, namespace, appName, serviceName string) error {
-	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      serviceName,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app": appName,
-			},
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{
-				"app": appName,
-			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "http",
-					Port:       80,
-					TargetPort: intstr.FromInt(8080),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
-			Type: corev1.ServiceTypeClusterIP,
-		},
-	}
+// func (ab *ABStrategy) CreateService(ctx context.Context, namespace, appName, serviceName string) error {
+// 	service := &corev1.Service{
+// 		ObjectMeta: metav1.ObjectMeta{
+// 			Name:      serviceName,
+// 			Namespace: namespace,
+// 			Labels: map[string]string{
+// 				"app": appName,
+// 			},
+// 		},
+// 		Spec: corev1.ServiceSpec{
+// 			Selector: map[string]string{
+// 				"app": appName,
+// 			},
+// 			Ports: []corev1.ServicePort{
+// 				{
+// 					Name:       "http",
+// 					Port:       80,
+// 					TargetPort: intstr.FromInt(8080),
+// 					Protocol:   corev1.ProtocolTCP,
+// 				},
+// 			},
+// 			Type: corev1.ServiceTypeClusterIP,
+// 		},
+// 	}
 
-	if _, err := ab.ServiceMgr.CreateService(ctx, service); err != nil {
-		// Check if service already exists
-		if errors.IsAlreadyExists(err) {
-			ab.logger.Info("service already exists, skipping creation", zap.String("service", serviceName))
-			return nil
-		}
-		return fmt.Errorf("failed to create service %s: %w", serviceName, err)
-	}
-	return nil
-}
+// 	if _, err := ab.ServiceMgr.CreateService(ctx, service); err != nil {
+// 		// Check if service already exists
+// 		if errors.IsAlreadyExists(err) {
+// 			ab.logger.Info("service already exists, skipping creation", zap.String("service", serviceName))
+// 			return nil
+// 		}
+// 		return fmt.Errorf("failed to create service %s: %w", serviceName, err)
+// 	}
+// 	return nil
+// }
 
 // Additional advanced management methods
 
@@ -905,7 +912,7 @@ func (ab *ABStrategy) EnableCanaryMode(ctx context.Context, namespace, name stri
 		{HeaderKey: "x-canary", HeaderValue: "disabled", Variant: "a", Weight: 100 - canaryPercent},
 	}
 
-	serviceName := status.ServiceName
+	serviceName := status.ServiceConfig.Name
 	if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
 		serviceName = status.ABConfig.ServiceName
 	}
@@ -977,7 +984,7 @@ func (ab *ABStrategy) GraduallyShiftTraffic(ctx context.Context, namespace, name
 			{HeaderKey: "x-shift", HeaderValue: "stable", Variant: oppositeVariant, Weight: 100 - newWeight},
 		}
 
-		serviceName := status.ServiceName
+		serviceName := status.ServiceConfig.Name
 		if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
 			serviceName = status.ABConfig.ServiceName
 		}
@@ -1074,7 +1081,7 @@ func (ab *ABStrategy) CleanupResources(ctx context.Context, namespace, name stri
 		return fmt.Errorf("failed to get deployment names: %w", err)
 	}
 
-	serviceName := status.ServiceName
+	serviceName := status.ServiceConfig.Name
 	if status.ABConfig != nil && status.ABConfig.ServiceName != "" {
 		serviceName = status.ABConfig.ServiceName
 	}
@@ -1113,4 +1120,61 @@ func (ab *ABStrategy) CleanupResources(ctx context.Context, namespace, name stri
 	ab.addEvent(status, "info", "cleanup", "All resources cleaned up successfully")
 
 	return ab.storage.SaveDeployment(ctx, status)
+}
+
+
+func (ab *ABStrategy) CreateService(ctx context.Context, namespace, name, serviceName string, appPort int32,
+	serviceConf *types.ServiceConfig, labels map[string]string) error {
+
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceName,
+			Namespace: namespace,
+			Labels:    labels,
+		},
+	}
+
+	if serviceConf.Type != "ExternalName" {
+		service.Spec = corev1.ServiceSpec{
+			Selector: labels,
+			Ports: []corev1.ServicePort{
+				{
+					Protocol:   corev1.ProtocolTCP,
+					Port:       serviceConf.Port,
+					TargetPort: intstr.FromInt32(appPort),
+				},
+			},
+		}
+	}
+
+	switch serviceConf.Type {
+	case "ClusterIP":
+		service.Spec.Type = corev1.ServiceTypeClusterIP
+
+	case "NodePort":
+		service.Spec.Type = corev1.ServiceTypeNodePort
+
+	case "LoadBalancer":
+		service.Spec.Type = corev1.ServiceTypeLoadBalancer
+
+	case "ExternalName":
+		service.Spec.Type = corev1.ServiceTypeExternalName
+		service.Spec.ExternalName = serviceConf.ExternalName
+
+	default:
+		return fmt.Errorf("unsupported service type: %s", serviceConf.Type)
+	}
+
+	if _, err := ab.ServiceMgr.CreateService(ctx, service); err != nil {
+		if errors.IsAlreadyExists(err) {
+			ab.logger.Info("service already exists, skipping creation", zap.String("service", serviceConf.Name))
+			return nil
+		}
+		ab.logger.Error("An error occurred while creating service", zap.Error(err))
+		return fmt.Errorf("error occurred while trying to create service: %w", err)
+	}
+
+	ab.logger.Info("Service created successfully", zap.String("name", name), zap.String("type", string(service.Spec.Type)))
+
+	return nil
 }

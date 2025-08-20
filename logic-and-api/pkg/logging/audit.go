@@ -51,7 +51,7 @@ func NewAuditLogger(cfg *config.AuditConfig, logger *zap.Logger) (*AuditLogger, 
     return auditLogger, nil
 }
 
-func (al *AuditLogger) LogDeploymentStart(request *types.DeploymentRequest, deploymentID, user string) {
+func (al *AuditLogger) LogDeploymentStart(request *types.DeploymentCreateRequest, deploymentID, user string) {
     if !al.enabled {
         return
     }
@@ -60,7 +60,7 @@ func (al *AuditLogger) LogDeploymentStart(request *types.DeploymentRequest, depl
         Timestamp:    time.Now(),
         EventType:    "deployment",
         DeploymentID: deploymentID,
-        AppName:      request.AppName,
+        AppName:      request.Name,
         Namespace:    request.Namespace,
         User:         user,
         Action:       "start",

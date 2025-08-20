@@ -11,7 +11,8 @@ type DeploymentStatus struct {
 	AppName        string                 `bson:"app_name"`
 	Namespace      string                 `bson:"namespace"`
 	Image          string                 `bson:"image"`
-	ServiceName    string                 `bson:"service_name"`
+	Port           int32                  `bson:"port"`
+	ServiceConfig *types.ServiceConfig    `bson:"service_config"`
 	Replicas       int32                  `bson:"replicas"`
 	Strategy       string                 `bson:"strategy"`
 	Status         string                 `bson:"status"`        // e.g., "pending", "in-progress", "success", "failed", "rolled-back"
@@ -54,6 +55,7 @@ type CanaryConfig struct {
 	StableWeight         int32  `bson:"stable_weight,omitempty"`
 	CanaryWeight         int32  `bson:"canary_weight,omitempty"`
 	DeploymentConfig    *types.CanaryConfig  `bson:"deployment_config"`
+	CanaryImage          string `bson:"canary_image,omitempty"`
 }
 
 type FeatureFlagConfig struct {
