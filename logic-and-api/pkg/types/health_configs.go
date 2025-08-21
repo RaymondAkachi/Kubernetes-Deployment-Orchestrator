@@ -10,9 +10,6 @@ import (
 type HealthCheckConfig struct {
 	Enabled bool `json:"enabled"`
 
-	LivenessProbe  *ProbeConfig `json:"livenessProbe,omitempty"`
-	ReadinessProbe *ProbeConfig `json:"readinessProbe,omitempty"`
-
 	// External orchestrator-level checks (e.g., Prometheus)
 	// You can add these fields here if needed.
 	PrometheusQueries []PrometheusMetricQuery `json:"prometheusQueries,omitempty"`

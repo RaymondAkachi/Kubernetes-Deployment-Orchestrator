@@ -8,13 +8,13 @@ import (
 type BlueGreenConfig struct {
 	ServiceConfig        *ServiceConfig  `json:"service_config"`
 	ActiveEnvironment string `json:"activeEnvironment" validate:"required,oneof=blue green"`
-	HealthCheck       string `json:"healthCheck,omitempty"`
+	// HealthCheck       string `json:"healthCheck,omitempty"`
 }
 
 // CanaryConfig defines configuration for canary deployments
 type CanaryConfig struct {
 	// NewServiceName  string        `json:"Newservice"`
-	HealthCheck       string `json:"healthCheck,omitempty"`
+	// HealthCheck       string `json:"healthCheck,omitempty"`
 	ServiceConfig        *ServiceConfig  `json:"service_config"`
     TrafficIncrement      int32           `json:"traffic_increment" yaml:"traffic_increment"`
     StepDuration          time.Duration `json:"step_duration" yaml:"step_duration"`
@@ -36,7 +36,7 @@ type TrafficStep struct {
 type ABConfig struct {
 	ServiceConfig        *ServiceConfig  `json:"service_config"`
 	RoutingRules []RoutingRule `json:"routingRules" validate:"required,dive"`
-	HealthCheck  string        `json:"healthCheck,omitempty"`
+	// HealthCheck  string        `json:"healthCheck,omitempty"`
 
 	//For update request
 	TargetVariant string `json:"targetVariant,omitempty" validate:"omitempty,oneof=a b"`

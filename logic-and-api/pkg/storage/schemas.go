@@ -10,9 +10,11 @@ type DeploymentStatus struct {
 	ID             string                 `bson:"id"`
 	AppName        string                 `bson:"app_name"`
 	Namespace      string                 `bson:"namespace"`
-	Image          string                 `bson:"image"`
-	Port           int32                  `bson:"port"`
+	// Image          string                 `bson:"image"`
+	// Port           int32                  `bson:"port"`
 	ServiceConfig *types.ServiceConfig    `bson:"service_config"`
+
+	ContainerSpec  *types.ContainerSpec   `bson:"container_spec"`
 	Replicas       int32                  `bson:"replicas"`
 	Strategy       string                 `bson:"strategy"`
 	Status         string                 `bson:"status"`        // e.g., "pending", "in-progress", "success", "failed", "rolled-back"
@@ -24,7 +26,7 @@ type DeploymentStatus struct {
 	//Strategy configurations
 	BlueGreenConfig *BlueGreenConfig	  `bson:"blue_green_config,omitempty"`
 	CanaryConfig   *CanaryConfig         `bson:"canary_config,omitempty"`
-	FeatureFlagConfig *FeatureFlagConfig `bson:"feature_flag_config,omitempty"`
+	// FeatureFlagConfig *FeatureFlagConfig `bson:"feature_flag_config,omitempty"`
 	ABConfig       *ABConfig             `bson:"ab_config,omitempty"`
 	HealthCheck    *types.HealthCheckConfig    `bson:"health_check,omitempty"` // Health
 	
@@ -58,18 +60,18 @@ type CanaryConfig struct {
 	CanaryImage          string `bson:"canary_image,omitempty"`
 }
 
-type FeatureFlagConfig struct {
-	DeploymentName string            `bson:"deployment_name"`
-	ConfigMapName string            `bson:"configMapName" validate:"required"`
-	Flags         map[string]string `bson:"flags" validate:"required"`
-	RolloutPercent int32               `bson:"rolloutPercent" validate:"required,min=0,max=100"`
-	HealthCheck   string            `bson:"healthCheck,omitempty"`
-}
+// type FeatureFlagConfig struct {
+// 	DeploymentName string            `bson:"deployment_name"`
+// 	ConfigMapName string            `bson:"configMapName" validate:"required"`
+// 	Flags         map[string]string `bson:"flags" validate:"required"`
+// 	RolloutPercent int32               `bson:"rolloutPercent" validate:"required,min=0,max=100"`
+// 	HealthCheck   string            `bson:"healthCheck,omitempty"`
+// }
 
 type ABConfig struct {
 	ServiceName  string        `bson:"serviceName" validate:"required"`
 	RoutingRules []RoutingRule `bson:"routingRules" validate:"required,dive"`
-	HealthCheck  string        `bson:"healthCheck,omitempty"`
+	// HealthCheck  string        `bson:"healthCheck,omitempty"`
 }
 
 // RoutingRule defines routing rules for A/B testing

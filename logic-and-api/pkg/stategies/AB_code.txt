@@ -1,3 +1,6 @@
+
+//AB deployment strategy source code willl be fixed later as not seem necessary for now
+
 package strategies
 
 import (
@@ -68,10 +71,11 @@ func (ab *ABStrategy) Create(ctx context.Context, request *types.DeploymentCreat
 		Namespace:    request.Namespace,
 		Replicas:     request.Replicas,
 		ServiceConfig:  request.ServiceConfig,
-		Port:          request.Port,
+		ContainerSpec:  request.ContainerSpec,
+		// Port:          request.Port,
 		Strategy:     request.Strategy,
 		AppName:      request.Name,
-		Image:        request.Image,
+		// Image:        request.Image,
 		Status:       "pending",
 		CurrentPhase: "initializing",
 		StartTime:    time.Now(),
@@ -83,7 +87,6 @@ func (ab *ABStrategy) Create(ctx context.Context, request *types.DeploymentCreat
 	status.ABConfig = &storage.ABConfig{
 		ServiceName:  request.ServiceConfig.Name,
 		RoutingRules: ab.convertRoutingRules(request.ABConfig.RoutingRules),
-		HealthCheck:  request.ABConfig.HealthCheck,
 	}
 
 	if err := ab.storage.SaveDeployment(ctx, status); err != nil {
@@ -150,17 +153,48 @@ func (ab *ABStrategy) Update(ctx context.Context, request *types.DeploymentUpdat
 
 	// Choose which variant to update (B by default for new versions)
 	targetDeployment := bDeploymentName
-	if request.ABConfig != nil {
+	if request.NewABConfig != nil {
 		// Allow specifying which variant to update
-		if variant := request.ABConfig.TargetVariant; variant == "a" {
+		if variant := request.NewABConfig.TargetVariant; variant == "a" {
 			targetDeployment = aDeploymentName
 		}
 	}
 
+	containerSpec := status.ContainerSpec
+	if request.NewContainerSpec != nil && request.NewContainerSpec.Image != "" {
+		container := corev1.Container{
+		Name:  request.Name,
+		Image: request.NewContainerSpec.Image,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(request.NewContainerSpec.CPU), //E.G 100m
+				corev1.ResourceMemory: resource.MustParse(request.NewContainerSpec.Memory), //EG 128Mi
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(request.NewContainerSpec.CPU), //E.G 500m
+				corev1.ResourceMemory: resource.MustParse(request.NewContainerSpec.Memory), //EG 512Mi
+			},
+		},
+	}
+
+		if request.NewHealthCheckConfig != nil && request.NewHealthCheckConfig.Enabled {
+			container.LivenessProbe = types.NewKubeProbe(request.NewContainerSpec.LivenessProbe)
+			container.ReadinessProbe = types.NewKubeProbe(request.NewContainerSpec.ReadinessProbe)
+		}
+
+		containerSpec = request.NewContainerSpec
+		 if err := ab.deploymentMgr.UpdateDeploymentContainer(ctx, request.Namespace, targetDeployment, container); err != nil {
+			ab.updateStatusWithError(ctx, status, "failed", "updating deplotyment container", err)
+		 }
+
+	} else {
 	// Update the target deployment
 	if err := ab.updateDeploymentImage(ctx, request, targetDeployment, status); err != nil {
 		return status, err
 	}
+
+	}
+	
 
 	// Update routing rules if provided
 	if err := ab.updateRoutingConfiguration(ctx, request, status, serviceName); err != nil {
@@ -174,7 +208,7 @@ func (ab *ABStrategy) Update(ctx context.Context, request *types.DeploymentUpdat
 
 	status.Metadata["last_update"] = time.Now().Format(time.RFC3339)
 	status.Metadata["updated_deployment"] = targetDeployment
-	status.Image = request.NewImage
+	status.ContainerSpec = containerSpec
 	status.ServiceConfig = serviceConf
 	ab.finalizeUpdate(status)
 	return status, ab.storage.SaveDeployment(ctx, status)
@@ -389,7 +423,7 @@ func (ab *ABStrategy) validateCreateRequest(request *types.DeploymentCreateReque
 	if request.Name == "" {
 		return fmt.Errorf("name is required")
 	}
-	if request.Image == "" {
+	if request.ContainerSpec == nil {
 		return fmt.Errorf("image is required")
 	}
 	if request.Replicas < 1 {
@@ -453,11 +487,31 @@ func (ab *ABStrategy) createABDeployments(ctx context.Context, request *types.De
 	
 	wg.Add(2)
 
+	container := corev1.Container{
+		Name:  request.Name,
+		Image: request.ContainerSpec.Image,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(request.ContainerSpec.CPU), //E.G 100m
+				corev1.ResourceMemory: resource.MustParse(request.ContainerSpec.Memory), //EG 128Mi
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(request.ContainerSpec.CPU), //E.G 500m
+				corev1.ResourceMemory: resource.MustParse(request.ContainerSpec.Memory), //EG 512Mi
+			},
+		},
+	}
+
+	if request.HealthCheckConfig != nil && request.HealthCheckConfig.Enabled {
+		container.LivenessProbe = types.NewKubeProbe(request.ContainerSpec.LivenessProbe)
+		container.ReadinessProbe = types.NewKubeProbe(request.ContainerSpec.ReadinessProbe)
+	}
+
 	// Create A deployment
 	go func() {
 		defer wg.Done()
 		if err := ab.createDeployment(ctx, request.Namespace, request.Name,
-			aDeploymentName, request.Image, request.Replicas, "a", request.HealthCheckConfig); err != nil {
+			aDeploymentName, request.Replicas, "a", container); err != nil {
 			errChan <- fmt.Errorf("failed to create A deployment: %w", err)
 		}
 	}()
@@ -466,7 +520,7 @@ func (ab *ABStrategy) createABDeployments(ctx context.Context, request *types.De
 	go func() {
 		defer wg.Done()
 		if err := ab.createDeployment(ctx, request.Namespace, request.Name,
-			bDeploymentName, request.Image, request.Replicas, "b", request.HealthCheckConfig); err != nil {
+			bDeploymentName, request.Replicas, "b", container); err != nil {
 			errChan <- fmt.Errorf("failed to create B deployment: %w", err)
 		}
 	}()
@@ -495,7 +549,7 @@ func (ab *ABStrategy) createOrUpdateService(ctx context.Context, namespace, appN
 	status *storage.DeploymentStatus) error {
 	
 	labels := map[string]string{"app": appName}
-	if err := ab.CreateService(ctx, namespace, appName, serviceName,  status.Port, status.ServiceConfig, labels); err != nil {
+	if err := ab.CreateService(ctx, namespace, appName, serviceName,  status.ContainerSpec.Port, status.ServiceConfig, labels); err != nil {
 		ab.updateStatusWithError(ctx, status, "failed", fmt.Sprintf("create_service_%s", serviceName), err)
 		return err
 	}
@@ -547,22 +601,28 @@ func (ab *ABStrategy) finalizeCreation(status *storage.DeploymentStatus, aDeploy
 }
 
 func (ab *ABStrategy) determineServiceName(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) *types.ServiceConfig {
-	if request.ABConfig != nil && 
-		request.ABConfig.ServiceConfig != nil {
+	if request.NewABConfig != nil && 
+		request.NewABConfig.ServiceConfig != nil {
 		
 		labels := map[string]string{"app": request.Name}
-		err := ab.CreateService(ctx, request.Namespace, request.Name, request.ABConfig.ServiceConfig.Name, 
-			status.Port, request.ABConfig.ServiceConfig, labels)
+		port := status.ContainerSpec.Port
+
+		if request.NewContainerSpec != nil && request.NewContainerSpec.Image != ""{
+			port = request.NewContainerSpec.Port
+		}
+
+		err := ab.CreateService(ctx, request.Namespace, request.Name, request.NewABConfig.ServiceConfig.Name, 
+			port, request.NewABConfig.ServiceConfig, labels)
 
 		if err != nil {
 			ab.logger.Warn("failed to create service during update", zap.Error(err))
 			// Fallback to existing service name if creation fails
 			ab.updateStatusWithError(ctx, status, "failed", "create_service_override",
-				fmt.Errorf("failed to create service %s: %w", request.ABConfig.ServiceConfig.Name, err))
+				fmt.Errorf("failed to create service %s: %w", request.NewABConfig.ServiceConfig.Name, err))
 			return status.ServiceConfig
 		}
 
-		return request.ABConfig.ServiceConfig
+		return request.NewABConfig.ServiceConfig
 	}
 	return status.ServiceConfig
 }
@@ -588,7 +648,7 @@ func (ab *ABStrategy) getDeploymentNames(status *storage.DeploymentStatus) (stri
 func (ab *ABStrategy) updateDeploymentImage(ctx context.Context, request *types.DeploymentUpdateRequest,
 	targetDeployment string, status *storage.DeploymentStatus) error {
 	
-	if err := ab.deploymentMgr.UpdateImage(ctx, request.Namespace, targetDeployment, request.NewImage); err != nil {
+	if err := ab.deploymentMgr.UpdateImage(ctx, request.Namespace, targetDeployment, status.ContainerSpec.Image); err != nil {
 		ab.updateStatusWithError(ctx, status, "failed", "update_image", err)
 		return err
 	}
@@ -612,9 +672,9 @@ func (ab *ABStrategy) updateRoutingConfiguration(ctx context.Context, request *t
 	}
 
 	// Override with new rules if provided
-	if request.ABConfig != nil && 
-	   len(request.ABConfig.RoutingRules) > 0 {
-		routingRules = request.ABConfig.RoutingRules
+	if request.NewABConfig != nil && 
+	   len(request.NewABConfig.RoutingRules) > 0 {
+		routingRules = request.NewABConfig.RoutingRules
 	}
 
 	if len(routingRules) > 0 {
@@ -633,8 +693,10 @@ func (ab *ABStrategy) updateRoutingConfiguration(ctx context.Context, request *t
 func (ab *ABStrategy) performUpdateHealthCheck(ctx context.Context, request *types.DeploymentUpdateRequest,
 	targetDeployment string, status *storage.DeploymentStatus) error {
 	
-	if request.HealthCheckConfig != nil && request.HealthCheckConfig.Enabled {
-		if err := ab.performHealthCheck(ctx, request.Namespace, targetDeployment, request.HealthCheckConfig); err != nil {
+	healthCheck := status.HealthCheck
+	if request.NewHealthCheckConfig != nil && request.NewHealthCheckConfig.Enabled {
+		healthCheck = request.NewHealthCheckConfig
+		if err := ab.performHealthCheck(ctx, request.Namespace, targetDeployment, healthCheck); err != nil {
 			ab.updateStatusWithError(ctx, status, "failed", "health_check_update", err)
 			return err
 		}
@@ -695,8 +757,8 @@ func (ab *ABStrategy) convertStorageRoutingRules(rules []storage.RoutingRule) []
 
 // Existing helper methods (unchanged but with better error handling)
 
-func (ab *ABStrategy) createDeployment(ctx context.Context, namespace, appname, deploymentName, image string, 
-	replicas int32, variant string, healthCheckConfig *types.HealthCheckConfig) error {
+func (ab *ABStrategy) createDeployment(ctx context.Context, namespace, appname, deploymentName string, 
+	replicas int32, variant string, container corev1.Container) error {
 	
 	Labels := map[string]string{
 		"app":     appname,
@@ -707,26 +769,6 @@ func (ab *ABStrategy) createDeployment(ctx context.Context, namespace, appname, 
 		Labels = map[string]string{
 			"app": appname,
 		}
-	}
-
-	container := corev1.Container{
-		Name:  appname,
-		Image: image,
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("100m"),
-				corev1.ResourceMemory: resource.MustParse("128Mi"),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("500m"),
-				corev1.ResourceMemory: resource.MustParse("512Mi"),
-			},
-		},
-	}
-
-	if healthCheckConfig != nil && healthCheckConfig.Enabled {
-		container.LivenessProbe = types.NewKubeProbe(healthCheckConfig.LivenessProbe)
-		container.ReadinessProbe = types.NewKubeProbe(healthCheckConfig.ReadinessProbe)
 	}
 
 	deployment := &appsv1.Deployment{

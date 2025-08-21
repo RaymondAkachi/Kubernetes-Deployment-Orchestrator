@@ -26,26 +26,26 @@ type CanaryStrategy struct {
 	istioMgr      istio.IstioManager
 	healthMonitor *monitoring.HealthMonitor
 	storage       storage.Interface
-	ServiceMgr *kubernetes.ServiceManager
+	serviceMgr    *kubernetes.ServiceManager
 	logger        *zap.Logger
 }
 
 func NewCanaryStrategy(
 	kubeClient *kubernetes.Client,
-	deploymentMgr kubernetes.DeploymentManager,
+	deploymentMgr *kubernetes.DeploymentManager,
 	istioMgr istio.IstioManager,
 	healthMonitor *monitoring.HealthMonitor,
 	storage storage.Interface,
-	ServiceMgr *kubernetes.ServiceManager,
+	serviceMgr *kubernetes.ServiceManager,
 	logger *zap.Logger,
 ) *CanaryStrategy {
 	return &CanaryStrategy{
 		kubeClient:    kubeClient,
-		deploymentMgr: kubernetes.NewDeploymentManager(kubeClient, logger),
+		deploymentMgr: deploymentMgr,
 		istioMgr:      istioMgr,
 		healthMonitor: healthMonitor,
 		storage:       storage,
-		ServiceMgr: ServiceMgr,
+		serviceMgr:    serviceMgr,
 		logger:        logger,
 	}
 }
@@ -54,7 +54,6 @@ func (c *CanaryStrategy) Name() string {
 	return "canary"
 }
 
-
 func (c *CanaryStrategy) CreateCanaryDeployment(ctx context.Context, request *types.DeploymentCreateRequest) (*storage.DeploymentStatus, error) {
 	deploymentID := uuid.New().String()
 
@@ -62,10 +61,9 @@ func (c *CanaryStrategy) CreateCanaryDeployment(ctx context.Context, request *ty
 		ID:           deploymentID,
 		Namespace:    request.Namespace,
 		Strategy:     request.Strategy,
-		ServiceConfig: request.ServiceConfig,
+		ServiceConfig: request.CanaryConfig.ServiceConfig,
 		Replicas:    request.Replicas,
 		AppName:       request.Name,
-		Image:        request.Image,
 		Status:       "pending",
 		CurrentPhase: "initializing",
 		StartTime:    time.Now(),
@@ -94,22 +92,37 @@ func (c *CanaryStrategy) CreateCanaryDeployment(ctx context.Context, request *ty
 	stableDeploymentName := fmt.Sprintf("%s-stable", request.Name)
 
 	// Create stable deployment
-	if err := c.createDeployment(ctx, status, request.Namespace, request.Name, stableDeploymentName, 
-		request.Image, int32(request.Replicas), "stable", request.HealthCheckConfig); err != nil {
+	container := corev1.Container{
+	Name:  request.Name,
+	Image: request.ContainerSpec.Image,
+	Ports: []corev1.ContainerPort{
+		{
+			ContainerPort: request.ContainerSpec.Port,
+		},
+	},
+	}
+
+	if request.HealthCheckConfig != nil{
+		container.LivenessProbe = types.NewKubeProbe(request.ContainerSpec.LivenessProbe)
+		container.ReadinessProbe = types.NewKubeProbe(request.ContainerSpec.ReadinessProbe)
+	}
+
+	if err := c.createDeployment(ctx, status, request.Namespace, request.Name, 
+		stableDeploymentName, request.Replicas, "stable", container); err != nil {
 
 		c.updateStatusWithError(ctx, status, "failed", "create_stable", err)
 		return status, err
 	}
 
-	serviceName := request.ServiceConfig.Name
+	serviceName := request.CanaryConfig.ServiceConfig.Name
 	if serviceName == "" {
 		serviceName = fmt.Sprintf("%s-service", request.Name)
 	}
 
 	//Create canary app service
 	labels := map[string]string{"app": request.Name}
-	if err := c.CreateService(ctx, request.Namespace, request.Name, serviceName, request.Port,
-		request.ServiceConfig, labels); err != nil {
+	if err := c.CreateService(ctx, request.Namespace, request.Name, serviceName, request.ContainerSpec.Port,
+		request.CanaryConfig.ServiceConfig, labels); err != nil {
 		c.updateStatusWithError(ctx, status, "failed", "create_service", err)
 		return status, err
 	}
@@ -129,6 +142,7 @@ func (c *CanaryStrategy) CreateCanaryDeployment(ctx context.Context, request *ty
 	status.CanaryConfig.StableWeight = 100
 	status.CanaryConfig.DeploymentConfig = request.CanaryConfig
 
+	status.ContainerSpec = request.ContainerSpec
 	status.Status = "success"
 	status.CurrentPhase = "completed"
 	c.addEvent(status, "info", "completed", "New canary deployment created")
@@ -137,28 +151,9 @@ func (c *CanaryStrategy) CreateCanaryDeployment(ctx context.Context, request *ty
 }
 
 func (c *CanaryStrategy) createDeployment(ctx context.Context, status *storage.DeploymentStatus,  
-	namespace, appname, deploymentName, image string, replicas int32, version string, 
-	healthCheckConfig *types.HealthCheckConfig) error {
-	
-	container := corev1.Container{
-		Name:  appname,
-		Image: image,
-	}
+	namespace, appname, deploymentName string, replicas int32, version string, 
+	container corev1.Container) error {
 
-	labels := map[string]string{
-		"app": appname,
-		"version": version,
-	}
-
-	if version == ""{
-		labels = map[string]string{"app": appname}
-	}
-
-	if healthCheckConfig != nil && healthCheckConfig.Enabled {
-		container.LivenessProbe = types.NewKubeProbe(healthCheckConfig.LivenessProbe)
-		container.ReadinessProbe = types.NewKubeProbe(healthCheckConfig.ReadinessProbe)
-	}
-	
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      deploymentName,
@@ -167,11 +162,17 @@ func (c *CanaryStrategy) createDeployment(ctx context.Context, status *storage.D
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
+				MatchLabels: map[string]string{
+					"version": version,
+					"app":        appname,
+				},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
+					Labels: map[string]string{
+						"version": version,
+						"app":        appname,
+					},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{container},
@@ -181,7 +182,7 @@ func (c *CanaryStrategy) createDeployment(ctx context.Context, status *storage.D
 	}
 	err := c.kubeClient.CreateDeployment(ctx, deployment)
 	if err != nil {
-		return fmt.Errorf("failed to create deployment %s: %w", appname, err)
+		return fmt.Errorf("failed to create deployment %s: %w", deploymentName, err)
 	}
 
 	for {
@@ -284,27 +285,54 @@ func (c *CanaryStrategy) UpdateCanaryDeployment(ctx context.Context, request *ty
 func (c *CanaryStrategy) prepareCanaryUpdate(ctx context.Context, request *types.DeploymentUpdateRequest, 
 	canaryName string, status *storage.DeploymentStatus, config *types.CanaryConfig) error {
 	
-	replicas := request.Replicas
+	replicas := request.NewReplicas
 	if replicas == 0{
 		replicas = status.Replicas
 	}
 
-	healthCheck := request.HealthCheckConfig
-	if healthCheck == nil{
-		healthCheck = status.HealthCheck
-	}
 
 	serviceConf := status.ServiceConfig
 	// serviceName := serviceConf.Name
-	if request.CanaryConfig.ServiceConfig != nil && request.CanaryConfig.ServiceConfig.Name != ""{
+	if request.NewCanaryConfig.ServiceConfig != nil && request.NewCanaryConfig.ServiceConfig.Name != ""{
 		// serviceName = request.CanaryConfig.ServiceConfig.Name
-		serviceConf = request.CanaryConfig.ServiceConfig
+		serviceConf = request.NewCanaryConfig.ServiceConfig
+	}
+	
+	container_spec := status.ContainerSpec
+	container := corev1.Container{
+		Name: status.AppName,
+		Image: status.ContainerSpec.Image,
+		Ports: []corev1.ContainerPort{
+			{
+				ContainerPort: status.ContainerSpec.Port,
+			},
+		},
+	}
+	container.LivenessProbe = types.NewKubeProbe(status.ContainerSpec.LivenessProbe)
+	container.ReadinessProbe = types.NewKubeProbe(status.ContainerSpec.ReadinessProbe)
+
+	if request.NewContainerSpec != nil && request.NewContainerSpec.Image != ""{
+		container_spec = request.NewContainerSpec
+		container = corev1.Container{
+		Name:  request.Name,
+		Image: request.NewContainerSpec.Image,
+		Ports: []corev1.ContainerPort{
+			{
+				ContainerPort: request.NewContainerSpec.Port,
+			},
+		},
+		}
+
+		if request.NewHealthCheckConfig != nil{
+			container.LivenessProbe = types.NewKubeProbe(request.NewContainerSpec.LivenessProbe)
+			container.ReadinessProbe = types.NewKubeProbe(request.NewContainerSpec.ReadinessProbe)
+		}
 	}
 
-	_, err := c.ServiceMgr.GetService(ctx, request.Namespace, serviceConf.Name)
+	_, err := c.serviceMgr.GetService(ctx, request.Namespace, serviceConf.Name)
 	if err != nil && errors.IsNotFound(err) {
 		labels := map[string]string{"app":request.Name}
-		if err = c.CreateService(ctx, request.Namespace, request.Name, serviceConf.Name, status.Port,
+		if err = c.CreateService(ctx, request.Namespace, request.Name, serviceConf.Name, status.ContainerSpec.Port,
 			serviceConf, labels); err != nil{
 
 			c.updateStatusWithError(ctx, status, "failed", "new service creation failed", err)
@@ -315,8 +343,8 @@ func (c *CanaryStrategy) prepareCanaryUpdate(ctx context.Context, request *types
 	// Create canary if not exists
 	_, err = c.kubeClient.GetDeployment(ctx, request.Namespace, canaryName)
 	if errors.IsNotFound(err) {
-		if err := c.createDeployment(ctx, status, request.Namespace, request.Name,
-			canaryName, request.NewImage, replicas, "canary", healthCheck); err != nil {
+		if err := c.createDeployment(ctx, status, request.Namespace, request.Name, canaryName,
+			replicas, "canary", container); err != nil {
 			return err
 		}
 
@@ -325,7 +353,7 @@ func (c *CanaryStrategy) prepareCanaryUpdate(ctx context.Context, request *types
 	}
 
 
-	if err := c.deploymentMgr.UpdateImage(ctx, request.Namespace, canaryName, request.NewImage); err != nil {
+	if err := c.deploymentMgr.UpdateDeploymentContainer(ctx, request.Namespace, canaryName, container); err != nil {
 		return fmt.Errorf("failed to update canary image: %w", err)
 	}
 
@@ -334,7 +362,9 @@ func (c *CanaryStrategy) prepareCanaryUpdate(ctx context.Context, request *types
 		return fmt.Errorf("failed to set initial weights: %w", err)
 	}
 	
-	status.CanaryConfig.CanaryImage = request.NewImage
+
+	status.CanaryConfig.CanaryImage = container.Image
+	status.Metadata["canary_container_spec"] = container_spec
 	status.ServiceConfig = serviceConf
 	status.CanaryConfig.CanaryWeight = config.InitialTrafficPercent
 	if err := c.storage.SaveDeployment(ctx, status); err != nil {
@@ -358,7 +388,14 @@ func (c *CanaryStrategy) cleanupCanary(ctx context.Context, namespace, serviceNa
 }
 
 func (c *CanaryStrategy) promoteCanaryUpdate(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) error {
-	if err := c.kubeClient.UpdateDepWithNamespace(ctx, request.Namespace, status.CanaryConfig.StableDeploymentName, request.NewImage); err != nil {
+	spec, ok := status.Metadata["canary_container_spec"].(*types.ContainerSpec)
+	if !ok {
+		return fmt.Errorf("canary container spec not found in metadata or is of the wrong type")
+	}
+
+	container := c.buildContainer(request.Name, spec, status.HealthCheck)
+	
+	if err := c.deploymentMgr.UpdateDeploymentContainer(ctx, request.Namespace, status.CanaryConfig.StableDeploymentName, container); err != nil {
 		return fmt.Errorf("failed to update stable image: %w", err)
 	}
 	if err := c.kubeClient.WaitForDeploymentReady(ctx, request.Namespace, status.CanaryConfig.StableDeploymentName, 5*time.Minute); err != nil {
@@ -378,27 +415,29 @@ func (c *CanaryStrategy) promoteCanaryUpdate(ctx context.Context, request *types
 
 	status.CanaryConfig.StableWeight = 100
 	status.CanaryConfig.CanaryWeight = 0
-	status.Image = request.NewImage
+	status.ContainerSpec = spec
 	status.Status = "success"
 	status.CurrentPhase = "completed"
-	status.EndTime = &[]time.Time{time.Now()}[0]
+	now := time.Now()
+	status.EndTime = &now
 	if err := c.storage.SaveDeployment(ctx, status); err != nil {
 		c.updateStatusWithError(ctx, status, "failed", "save_after_promotion", err)
-		return fmt.Errorf("failed to save deployment status after promotion: %w", err)	
+		return fmt.Errorf("failed to save deployment status after promotion: %w", err)
 	}
 	return nil
 }
 
-func (c *CanaryStrategy) Rollback(ctx context.Context, deploymentName string) error {
-	status, err := c.storage.GetDeploymentByName(ctx, "", deploymentName)
+func (c *CanaryStrategy) Rollback(ctx context.Context, namespace, deploymentName string) error {
+	status, err := c.storage.GetDeploymentByName(ctx, namespace, deploymentName)
 	if err != nil {
 		return fmt.Errorf("failed to get deployment status: %w", err)
 	}
 
 	c.cleanupCanary(ctx, status.Namespace, status.ServiceConfig.Name, status.CanaryConfig.CanaryDeploymentName, status)
 
-	status.Status = "rolled-back"
-	status.EndTime = &[]time.Time{time.Now()}[0]
+	status.Status = "rolled back"
+	now := time.Now()
+	status.EndTime = &now
 	c.addEvent(status, "info", "rollback", "Rolled back to stable")
 	return c.storage.SaveDeployment(ctx, status)
 }
@@ -468,9 +507,12 @@ func (c *CanaryStrategy) CreateService(ctx context.Context, namespace, name, ser
 		return fmt.Errorf("unsupported service type: %s", serviceConf.Type)
 	}
 
-	if _, err := c.ServiceMgr.CreateService(ctx, service); err != nil {
+	if _, err := c.serviceMgr.CreateService(ctx, service); err != nil {
 		if errors.IsAlreadyExists(err) {
-			c.logger.Info("service already exists, skipping creation", zap.String("service", serviceConf.Name))
+			c.logger.Info("service already exists, updating service", zap.String("service", serviceConf.Name))
+			if _, err := c.serviceMgr.UpdateService(ctx, service); err != nil {
+				c.logger.Info("failed to update service ", zap.String("service", serviceConf.Name))
+			}
 			return nil
 		}
 		c.logger.Error("An error occurred while creating service", zap.Error(err))
@@ -481,7 +523,6 @@ func (c *CanaryStrategy) CreateService(ctx context.Context, namespace, name, ser
 
 	return nil
 }
-
 
 func (c *CanaryStrategy) waitForCanaryReady(ctx context.Context, request *types.DeploymentUpdateRequest, 
 	canaryName string, status *storage.DeploymentStatus, config *types.CanaryConfig) error {
@@ -496,7 +537,7 @@ func (c *CanaryStrategy) waitForCanaryReady(ctx context.Context, request *types.
 func (c *CanaryStrategy) performInitialHealthCheck(ctx context.Context, request *types.DeploymentUpdateRequest, 
 	canaryName string, status *storage.DeploymentStatus, config *types.CanaryConfig) error {
 	
-	health := request.HealthCheckConfig
+	health := request.NewHealthCheckConfig
 	if health == nil {
 		health = status.HealthCheck
 	}
@@ -516,8 +557,8 @@ func (c *CanaryStrategy) executeProgressiveRollout(ctx context.Context, request 
 	servicename := status.ServiceConfig.Name
 
 	health := status.HealthCheck
-	if request.HealthCheckConfig != nil{
-		health = request.HealthCheckConfig
+	if request.NewHealthCheckConfig != nil{
+		health = request.NewHealthCheckConfig
 	}
 
 	currentPercent := config.InitialTrafficPercent
@@ -537,7 +578,7 @@ func (c *CanaryStrategy) executeProgressiveRollout(ctx context.Context, request 
 		c.addEvent(status, "info", "rollout", fmt.Sprintf("Traffic shifted to %d%% canary", currentPercent))
 
 		// if request.HealthCheck != "" {
-		if request.HealthCheckConfig != nil {
+		if request.NewHealthCheckConfig != nil {
 			if err := c.waitAndCheckHealth(ctx, request, config, health, status); err != nil {
 				return err
 			}
@@ -571,6 +612,21 @@ func (c *CanaryStrategy) waitAndCheckHealth(ctx context.Context, request *types.
 			}
 		}
 	}
+}
+
+func (c *CanaryStrategy) buildContainer(appName string, spec *types.ContainerSpec, healthConfig *types.HealthCheckConfig) corev1.Container {
+	container := corev1.Container{
+		Name:  appName,
+		Image: spec.Image,
+		Ports: []corev1.ContainerPort{
+			{ContainerPort: spec.Port},
+		},
+	}
+	if healthConfig != nil {
+		container.LivenessProbe = types.NewKubeProbe(spec.LivenessProbe)
+		container.ReadinessProbe = types.NewKubeProbe(spec.ReadinessProbe)
+	}
+	return container
 }
 
 // func (c *CanaryStrategy) createCanaryService(ctx context.Context, namespace, serviceName, appName string) (error) {

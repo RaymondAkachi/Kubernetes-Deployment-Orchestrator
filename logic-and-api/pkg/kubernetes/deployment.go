@@ -134,4 +134,31 @@ func(m *DeploymentManager) IsDeploymentReady(ctx context.Context, namespace, nam
     }
     
     return false, nil
-}   
+}
+
+
+func(dm *DeploymentManager) UpdateDeploymentContainer(ctx context.Context, namespace, deploymentName string, new_container corev1.Container) error{
+    deployment, err := dm.client.GetDeployment(ctx, namespace, deploymentName)
+    if err != nil {
+        return fmt.Errorf("failed to retieve deployment")
+    }
+    
+    for i, container := range deployment.Spec.Template.Spec.Containers {
+        if container.Name == new_container.Name {
+            deployment.Spec.Template.Spec.Containers[i] = new_container
+            break
+        }
+    }
+
+    _, err = dm.client.UpdateDeployment(ctx, deployment)
+    if err != nil {
+        return fmt.Errorf("failed to update deployment: %w", err)
+    }
+    
+    dm.logger.Info("deployment container updated",
+        zap.String("namespace", namespace),
+        zap.String("deploymentname", deploymentName),
+        zap.String("container", new_container.Name))
+    
+    return nil
+}

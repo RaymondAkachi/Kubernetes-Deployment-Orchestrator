@@ -9,42 +9,52 @@ import (
 type DeploymentCreateRequest struct {
 	Namespace         string            `json:"namespace" validate:"required"`
 	Name              string            `json:"name" validate:"required"`
-	Image             string            `json:"image" validate:"required"`
+	// Image             string            `json:"image" validate:"required"`
 	Replicas          int32             `json:"replicas" validate:"required,min=1"`
-	ServiceConfig    *ServiceConfig     `json:"service_config" validate:"required"`
+	// ServiceConfig    *ServiceConfig     `json:"service_config" validate:"required"`
 	Strategy          string            `json:"strategy" validate:"required"`
-	Port              int32             `json:"port" validate:"required"`
+	// Port              int32             `json:"port" validate:"required"`
+	ContainerSpec    *ContainerSpec     `json:"countainer_spec" validate:"required"`
 
+	HealthCheckConfig *HealthCheckConfig `json:"healthCheckConfig,omitempty"`
 
 	//Configs for different strategies
 	BlueGreenConfig   *BlueGreenConfig  `json:"blueGreenConfig,omitempty" validate:"required_if=Strategy blue-green"`
 	CanaryConfig      *CanaryConfig     `json:"canaryConfig,omitempty" validate:"required_if=Strategy canary"`
 	ABConfig          *ABConfig         `json:"abConfig,omitempty" validate:"required_if=Strategy ab"`
-	HealthCheckConfig *HealthCheckConfig `json:"healthCheckConfig,omitempty"`
 }
 
 // DeploymentUpdateRequest represents the request for updating an existing deployment
 type DeploymentUpdateRequest struct {
 	Namespace         string            `json:"namespace" validate:"required"`
 	Name              string            `json:"name" validate:"required"`
-	NewImage          string            `json:"newImage" validate:"required"`
-	Replicas          int32               `json:"replicas,omitempty" validate:"omitempty,min=1"`
+	// NewImage          string            `json:"newImage" validate:"required"`
+	NewReplicas          int32               `json:"replicas,omitempty" validate:"omitempty,min=1"`
+	NewContainerSpec    *ContainerSpec     `json:"new_countainer_spec" validate:"reequired"`
 
-	HealthCheckConfig *HealthCheckConfig `json:"healthCheckConfig,omitempty"`
+	NewHealthCheckConfig *HealthCheckConfig `json:"new_healthCheck_config,omitempty"`
 
-	ABConfig          *ABConfig         `json:"abConfig,omitempty"`
-	CanaryConfig    *CanaryConfig    `json:"canaryConfig,omitempty"`
-	BlueGreenConfig   *BlueGreenConfig   `json:"BlueGreenConfig,omitempty"`
+	NewABConfig          *ABConfig         `json:"new_abConfig,omitempty"`
+	NewCanaryConfig    *CanaryConfig    `json:"new_canaryConfig,omitempty"`
+	NewBlueGreenConfig   *BlueGreenConfig   `json:"new_BlueGreenConfig,omitempty"`
 }
 
-// StrategyOverride allows overriding the strategy for updates
-// type StrategyOverride struct {
-// 	Strategy        string           `json:"strategy" validate:"required"`
-// 	BlueGreenConfig *BlueGreenConfig `json:"blueGreenConfig,omitempty" validate:"required_if=Strategy blue-green"`
-// 	CanaryConfig    *CanaryConfig    `json:"canaryConfig,omitempty" validate:"required_if=Strategy canary"`
-// 	ABConfig          *ABConfig         `json:"abConfig,omitempty" validate:"required_if=Strategy ab"`
-// }
 
+type ContainerSpec struct {
+	Image   string            `json:"image"`
+	Port   int32           `json:"ports"`
+	CPU     string            `json:"cpu"`
+	Memory  string            `json:"memory"`
+
+	LivenessProbe  *ProbeConfig `json:"livenessProbe"`
+	ReadinessProbe *ProbeConfig `json:"readinessProbe"`
+}
+
+// ProbeSpec defines a simple probe for health checks.
+// type ProbeSpec struct {
+//     Path string `json:"path"`
+//     Port int32 `json:"port"`
+// }
 
 type ServiceConfig struct {
 	Name     string `json:"name"`
