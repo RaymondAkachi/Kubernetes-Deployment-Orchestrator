@@ -100,7 +100,7 @@ func (bg *BlueGreenStrategy) Validate(request *types.DeploymentCreateRequest) er
 // 	return nil, fmt.Errorf("use CreateBlueGreenDeployment or UpdateBlueGreenDeployment")
 // }
 
-func (bg *BlueGreenStrategy) CreateBlueGreenDeployment(ctx context.Context, request *types.DeploymentCreateRequest) (*storage.DeploymentStatus, error) {
+func (bg *BlueGreenStrategy) CreateAppDeployment(ctx context.Context, request *types.DeploymentCreateRequest) (*storage.DeploymentStatus, error) {
 	deploymentID := uuid.New().String()
 
 	status := &storage.DeploymentStatus{
@@ -119,22 +119,12 @@ func (bg *BlueGreenStrategy) CreateBlueGreenDeployment(ctx context.Context, requ
 		BlueGreenConfig: &storage.BlueGreenConfig{},
 	}
 
-	if err := bg.storage.SaveDeployment(ctx, status); err != nil {
-		return nil, fmt.Errorf("failed to store initial deployment status: %w", err)
+	if err := bg.storage.CreateDeployment(ctx, status); err != nil {
+		return nil, fmt.Errorf("failed to create initial deployment in database: %w", err)
 	}
 
 	bg.addEvent(status, "info", phaseInitializing, "Starting blue-green deployment creation")
 
-	// Check for uniqueness
-	if existing, err := bg.storage.GetDeploymentByName(ctx, request.Namespace, request.Name); err != nil && !errors.IsNotFound(err) {
-		bg.updateStatusWithError(ctx, status, statusFailed, "check_unique", err)
-		return status, err
-	} else if existing != nil {
-		err := fmt.Errorf("deployment name %s already exists", request.Name)
-		bg.updateStatusWithError(ctx, status, statusFailed, "check_unique", err)
-		return status, err
-	}
-	
 	activeEnv := request.BlueGreenConfig.ActiveEnvironment
 	targetEnv := envGreen
 	if activeEnv == envGreen {
@@ -187,12 +177,12 @@ func (bg *BlueGreenStrategy) CreateBlueGreenDeployment(ctx context.Context, requ
 	status.Status = statusSuccess
 	status.CurrentPhase = phaseCompleted
 	bg.addEvent(status, "info", phaseCompleted, "New blue-green deployment created")
-	bg.storage.SaveDeployment(ctx, status)
+	bg.storage.UpdateDeployment(ctx, status)
 	return status, nil
 }
 
-func (bg *BlueGreenStrategy) UpdateBlueGreenDeployment(ctx context.Context, request *types.DeploymentUpdateRequest) (*storage.DeploymentStatus, error) {
-	status, err := bg.storage.GetDeploymentByName(ctx, request.Namespace, request.Name)
+func (bg *BlueGreenStrategy) UpdateAppDeployment(ctx context.Context, request *types.DeploymentUpdateRequest) (*storage.DeploymentStatus, error) {
+	status, err := bg.storage.GetDeploymentByAppNamespace(ctx, request.Namespace, request.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve deployment status: %w", err)
 	}
@@ -264,7 +254,7 @@ func (bg *BlueGreenStrategy) UpdateBlueGreenDeployment(ctx context.Context, requ
 	now := time.Now()
 	status.EndTime = &now
 	bg.addEvent(status, "info", phaseCompleted, "Blue-green deployment update completed")
-	bg.storage.SaveDeployment(ctx, status)
+	bg.storage.UpdateDeployment(ctx, status)
 	return status, nil
 }
 
@@ -348,13 +338,13 @@ func (bg *BlueGreenStrategy) updateStatusWithError(ctx context.Context, status *
 	status.Error = err.Error()
 	status.EndTime = &[]time.Time{time.Now()}[0]
 	bg.addEvent(status, "error", phase, err.Error())
-	bg.storage.SaveDeployment(ctx,  status)
+	bg.storage.UpdateDeployment(ctx,  status)
 }
 
-func (bg *BlueGreenStrategy) Rollback(ctx context.Context, namespace, deploymentName string) error {
-	status, err := bg.storage.GetDeploymentByName(ctx, namespace, deploymentName)
+func (bg *BlueGreenStrategy) Rollback(ctx context.Context, namespace, deploymentName string) (*storage.DeploymentStatus, error) {
+	status, err := bg.storage.GetDeploymentByAppNamespace(ctx, namespace, deploymentName)
 	if err != nil {
-		return fmt.Errorf("failed to get deployment status: %w", err)
+		return nil ,fmt.Errorf("failed to get deployment status: %w", err)
 	}
 
 	// The "target" deployment is the one we want to roll back to
@@ -362,17 +352,17 @@ func (bg *BlueGreenStrategy) Rollback(ctx context.Context, namespace, deployment
 	
 	// Ensure the rollback target is scaled up
 	if err := bg.kubeClient.ScaleDeployment(ctx, status.Namespace, rollbackTarget, status.Replicas); err != nil {
-		return fmt.Errorf("failed to scale up rollback target deployment: %w", err)
+		return nil, fmt.Errorf("failed to scale up rollback target deployment: %w", err)
 	}
 
 	// Wait for it to be ready
 	if err := bg.kubeClient.WaitForDeploymentReady(ctx, status.Namespace, rollbackTarget, 5*time.Minute); err != nil {
-		return fmt.Errorf("rollback target deployment did not become ready: %w", err)
+		return nil, fmt.Errorf("rollback target deployment did not become ready: %w", err)
 	}
 
 	// Switch traffic back
 	if err := bg.serviceMgr.SwitchTrafficTo(ctx, status.Namespace, status.ServiceConfig.Name, rollbackTarget); err != nil {
-		return fmt.Errorf("failed to switch traffic during rollback: %w", err)
+		return nil, fmt.Errorf("failed to switch traffic during rollback: %w", err)
 	}
 
 	// Swap roles back
@@ -383,7 +373,12 @@ func (bg *BlueGreenStrategy) Rollback(ctx context.Context, namespace, deployment
 	now := time.Now()
 	status.EndTime = &now
 	bg.addEvent(status, "info", "rollback", "Rolled back to previous active deployment")
-	return bg.storage.SaveDeployment(ctx, status)
+	err =  bg.storage.UpdateDeployment(ctx, status)
+	if err != nil{
+		return nil, fmt.Errorf("there was an issue saving the final state to the db, %v", err)
+	}
+
+	return status, nil
 }
 
 func (bg *BlueGreenStrategy) GetStatus(ctx context.Context, deploymentID string) (*storage.DeploymentStatus, error) {
@@ -477,8 +472,13 @@ func (bg *BlueGreenStrategy) buildContainer(appName string, spec *types.Containe
 		},
 	}
 	if healthConfig != nil && healthConfig.Enabled {
-		container.LivenessProbe = types.NewKubeProbe(spec.LivenessProbe)
-		container.ReadinessProbe = types.NewKubeProbe(spec.ReadinessProbe)
+		if spec.LivenessProbe != nil{
+			container.LivenessProbe = types.NewKubeProbe(spec.LivenessProbe)
+		}
+		if spec.ReadinessProbe != nil{
+			container.ReadinessProbe = types.NewKubeProbe(spec.ReadinessProbe)
+		}
 	}
+	
 	return container
 }

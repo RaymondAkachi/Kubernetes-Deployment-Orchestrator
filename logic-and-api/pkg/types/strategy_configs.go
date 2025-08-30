@@ -6,24 +6,19 @@ import (
 
 // BlueGreenConfig defines configuration for blue-green deployments
 type BlueGreenConfig struct {
-	ServiceConfig        *ServiceConfig  `json:"service_config"`
-	ActiveEnvironment string `json:"activeEnvironment" validate:"required,oneof=blue green"`
-	// HealthCheck       string `json:"healthCheck,omitempty"`
+	ServiceConfig        *ServiceConfig  `json:"service_config" validate:"required"`
+	ActiveEnvironment    string          `json:"activeEnvironment" validate:"required,oneof=blue green"`
 }
 
 // CanaryConfig defines configuration for canary deployments
 type CanaryConfig struct {
-	// NewServiceName  string        `json:"Newservice"`
-	// HealthCheck       string `json:"healthCheck,omitempty"`
-	ServiceConfig        *ServiceConfig  `json:"service_config"`
-    TrafficIncrement      int32           `json:"traffic_increment" yaml:"traffic_increment"`
-    StepDuration          time.Duration `json:"step_duration" yaml:"step_duration"`
-	InitialTrafficPercent int32       `json:"initialTrafficPercent" validate:"required,min=1,max=100"`
-	// TrafficSteps      []TrafficStep `json:"trafficSteps" validate:"required"`
-	MaxTrafficPercent int32         `json:"maxTrafficPercent" validate:"required,min=1,max=100"`
-	// ServiceName       string        `json:"serviceName" validate:"required"`
-	AutoPromote       bool          `json:"autoPromote" validate:"required"`
-	AnalysisInterval  time.Duration `json:"analysis_interval" validate:"required"`
+	ServiceConfig         *ServiceConfig  `json:"service_config" validate:"required"`
+    TrafficIncrement      int32           `json:"traffic_increment" validate:"required"`
+    StepDuration          time.Duration   `json:"step_duration" validate:"required"`
+	InitialTrafficPercent int32           `json:"initialTrafficPercent" validate:"required,min=1,max=100"`
+	MaxTrafficPercent     int32           `json:"maxTrafficPercent" validate:"required,min=1,max=100"`
+	AutoPromote           bool            `json:"autoPromote" validate:"required"`
+	AnalysisInterval      time.Duration   `json:"analysis_interval" validate:"required,min=1s"`
 }
 
 // TrafficStep represents a step in traffic shifting for canary

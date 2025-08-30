@@ -30,7 +30,7 @@ func NewPrometheusClient(cfg *config.PrometheusConfig, logger *zap.Logger) (*Pro
 		// Enable TLS for secure communication
 		RoundTripper: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: false, // Enforce TLS verification
+				InsecureSkipVerify: true, // Allow non-tls for now
 			},
 		},
 	})

@@ -26,26 +26,28 @@ type ProbeConfig struct {
 	SuccessThreshold    int32 `json:"successThreshold,omitempty"`
 	FailureThreshold    int32 `json:"failureThreshold,omitempty"`
 
-	HTTPGet   *HTTPGetAction   `json:"httpGet,omitempty"`
-	TCPSocket *TCPSocketAction `json:"tcpSocket,omitempty"`
-	Exec      *ExecAction      `json:"exec,omitempty"`
+	// These fields are mutually exclusive. Exactly one must be provided.
+	HTTPGet   *HTTPGetAction   `json:"httpGet,omitempty" validate:"required_without_all=TCPSocket Exec"`
+	TCPSocket *TCPSocketAction `json:"tcpSocket,omitempty" validate:"required_without_all=HTTPGet Exec"`
+	Exec      *ExecAction      `json:"exec,omitempty" validate:"required_without_all=HTTPGet TCPSocket"`
 }
 
 // HTTPGetAction defines an HTTP GET health check.
 type HTTPGetAction struct {
 	Path string `json:"path,omitempty"`
-	Port int32  `json:"port,omitempty"`
+	Port int32  `json:"port,omitempty" validate:"required"`
 }
 
 // TCPSocketAction defines a TCP socket health check.
 type TCPSocketAction struct {
-	Port int32 `json:"port,omitempty"`
+	Port int32 `json:"port,omitempty" validate:"required"`
 }
 
 // ExecAction defines an exec health check.
 type ExecAction struct {
-	Command []string `json:"command,omitempty"`
+	Command []string `json:"command,omitempty" validate:"required,min=1"`
 }
+
 // PrometheusMetricQuery defines a Prometheus query for health checks
 type PrometheusMetricQuery struct {
 	Name        string  `json:"name" validate:"required"`
@@ -56,12 +58,11 @@ type PrometheusMetricQuery struct {
 }
 
 // NewKubeProbe converts a ProbeConfig to a Kubernetes corev1.Probe object.
-// It handles all three possible probe types (HTTP, TCP, and Exec).
 func NewKubeProbe(probeConfig *ProbeConfig) *corev1.Probe {
 	if probeConfig == nil {
 		return nil
 	}
-
+	
 	kubeProbe := &corev1.Probe{
 		InitialDelaySeconds: probeConfig.InitialDelaySeconds,
 		PeriodSeconds:       probeConfig.PeriodSeconds,

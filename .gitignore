@@ -7,4 +7,3 @@ tests
 Dockerfile
 build-script-test.sh
 config-watcher/Dockerfile
-logic-and-api/pkg/cli

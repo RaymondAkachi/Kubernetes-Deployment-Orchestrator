@@ -11,13 +11,15 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
+
+	// networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apimachinery/pkg/watch"
+
+	// "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -27,7 +29,7 @@ import (
 )
 
 type Client struct {
-    clientset      kubernetes.Interface
+    clientset      *kubernetes.Clientset
     config         *rest.Config
     logger         *zap.Logger
     defaultTimeout time.Duration
@@ -40,12 +42,7 @@ type ClientInterface interface {
     UpdateDeployment(ctx context.Context, deployment *appsv1.Deployment) (*appsv1.Deployment, error)
     ScaleDeployment(ctx context.Context, namespace, name string, replicas int32) error
     WaitForDeploymentReady(ctx context.Context, namespace, name string, timeout time.Duration) error
-    GetService(ctx context.Context, namespace, name string) (*corev1.Service, error)
-    UpdateService(ctx context.Context, service *corev1.Service) (*corev1.Service, error)
-    GetIngress(ctx context.Context, namespace, name string) (*networkingv1.Ingress, error)
-    UpdateIngress(ctx context.Context, ingress *networkingv1.Ingress) (*networkingv1.Ingress, error)
-    ListPods(ctx context.Context, namespace string, labelSelector string) (*corev1.PodList, error)
-    WatchPods(ctx context.Context, namespace string, labelSelector string) (watch.Interface, error)
+    GetConfig() *rest.Config
 }
 
 func NewClient(cfg *config.Config, logger *zap.Logger) (*Client, error) {
@@ -238,4 +235,12 @@ func(c *Client) DeleteDeployment(ctx context.Context, namespace, name string) er
     }
 
     return nil
+}
+
+func(c *Client) GetConfig() *rest.Config{
+    return c.config
+}
+
+func(c *Client) GetClientSet() *kubernetes.Clientset {
+    return c.clientset
 }

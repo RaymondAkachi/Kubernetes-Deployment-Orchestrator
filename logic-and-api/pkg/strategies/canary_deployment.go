@@ -32,20 +32,20 @@ type CanaryStrategy struct {
 
 func NewCanaryStrategy(
 	kubeClient *kubernetes.Client,
-	deploymentMgr *kubernetes.DeploymentManager,
+	// deploymentMgr *kubernetes.DeploymentManager,
 	istioMgr istio.IstioManager,
 	healthMonitor *monitoring.HealthMonitor,
 	storage storage.Interface,
-	serviceMgr *kubernetes.ServiceManager,
+	// serviceMgr *kubernetes.ServiceManager,
 	logger *zap.Logger,
 ) *CanaryStrategy {
 	return &CanaryStrategy{
 		kubeClient:    kubeClient,
-		deploymentMgr: deploymentMgr,
+		deploymentMgr: kubernetes.NewDeploymentManager(kubeClient, logger),
 		istioMgr:      istioMgr,
 		healthMonitor: healthMonitor,
 		storage:       storage,
-		serviceMgr:    serviceMgr,
+		serviceMgr:    kubernetes.NewServiceManager(kubeClient, logger),
 		logger:        logger,
 	}
 }
@@ -54,7 +54,7 @@ func (c *CanaryStrategy) Name() string {
 	return "canary"
 }
 
-func (c *CanaryStrategy) CreateCanaryDeployment(ctx context.Context, request *types.DeploymentCreateRequest) (*storage.DeploymentStatus, error) {
+func (c *CanaryStrategy) CreateAppDeployment(ctx context.Context, request *types.DeploymentCreateRequest) (*storage.DeploymentStatus, error) {
 	deploymentID := uuid.New().String()
 
 	status := &storage.DeploymentStatus{
@@ -71,23 +71,11 @@ func (c *CanaryStrategy) CreateCanaryDeployment(ctx context.Context, request *ty
 		Events:       []storage.DeploymentEvent{},
 	}
 
-	if err := c.storage.SaveDeployment(ctx, status); err != nil {
+	if err := c.storage.CreateDeployment(ctx, status); err != nil {
 		return nil, fmt.Errorf("failed to store deployment status: %w", err)
 	}
 
 	c.addEvent(status, "info", "initializing", "Starting canary deployment creation")
-
-	// Check if app name is unique
-	existing, err := c.storage.GetDeploymentByName(ctx, request.Namespace, request.Name)//Getting app by name and namespace
-	if err != nil && !errors.IsNotFound(err) {
-		c.updateStatusWithError(ctx, status, "failed", "check_unique", err)
-		return status, err
-	}
-
-	if existing != nil {
-		c.updateStatusWithError(ctx, status, "failed", "check_unique", fmt.Errorf("deployment name %s already exists", request.Name))
-		return status, fmt.Errorf("deployment name %s already exists", request.Name)
-	}
 
 	stableDeploymentName := fmt.Sprintf("%s-stable", request.Name)
 
@@ -146,7 +134,7 @@ func (c *CanaryStrategy) CreateCanaryDeployment(ctx context.Context, request *ty
 	status.Status = "success"
 	status.CurrentPhase = "completed"
 	c.addEvent(status, "info", "completed", "New canary deployment created")
-	c.storage.SaveDeployment(ctx, status)
+	c.storage.UpdateDeployment(ctx, status)
 	return status, nil
 }
 
@@ -230,8 +218,8 @@ func (c *CanaryStrategy) setupIstio(ctx context.Context, namespace, serviceName 
 }
 
 
-func (c *CanaryStrategy) UpdateCanaryDeployment(ctx context.Context, request *types.DeploymentUpdateRequest) (*storage.DeploymentStatus, error) {
-	status, err := c.storage.GetDeploymentByName(ctx, request.Namespace, request.Name)
+func (c *CanaryStrategy) UpdateAppDeployment(ctx context.Context, request *types.DeploymentUpdateRequest) (*storage.DeploymentStatus, error) {
+	status, err := c.storage.GetDeploymentByAppNamespace(ctx, request.Namespace, request.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get deployment for update: %w", err)
 	}
@@ -261,10 +249,12 @@ func (c *CanaryStrategy) UpdateCanaryDeployment(ctx context.Context, request *ty
 		c.addEvent(status, "info", phase.name, fmt.Sprintf("Starting %s phase", phase.name))
 		if err := phase.fn(ctx, request, canaryDeploymentName, status, config); err != nil {
 			c.updateStatusWithError(ctx, status, "failed", phase.name, err)
-			c.cleanupCanary(ctx, request.Namespace, status.ServiceConfig.Name, canaryDeploymentName, status)
+			if err = c.cleanupCanary(ctx, request.Namespace, status.ServiceConfig.Name, canaryDeploymentName, status); err != nil{
+				return nil, fmt.Errorf("an operation failed during update, attempted rollback failed %v", err )
+			}
 			return status, err
 		}
-		c.storage.SaveDeployment(ctx, status)
+		c.storage.UpdateDeployment(ctx, status)
 	}
 
 	if config.AutoPromote {
@@ -278,7 +268,7 @@ func (c *CanaryStrategy) UpdateCanaryDeployment(ctx context.Context, request *ty
 	status.CurrentPhase = "completed"
 	status.EndTime = &[]time.Time{time.Now()}[0]
 	c.addEvent(status, "info", "completed", "Canary deployment update completed")
-	c.storage.SaveDeployment(ctx, status)
+	c.storage.UpdateDeployment(ctx, status)
 	return status, nil
 }
 
@@ -367,7 +357,7 @@ func (c *CanaryStrategy) prepareCanaryUpdate(ctx context.Context, request *types
 	status.Metadata["canary_container_spec"] = container_spec
 	status.ServiceConfig = serviceConf
 	status.CanaryConfig.CanaryWeight = config.InitialTrafficPercent
-	if err := c.storage.SaveDeployment(ctx, status); err != nil {
+	if err := c.storage.UpdateDeployment(ctx, status); err != nil {
 		c.updateStatusWithError(ctx, status, "failed", "failed to save deployment status", err)
 		return fmt.Errorf("failed to save deployment status: %w", err)
 	}
@@ -376,15 +366,19 @@ func (c *CanaryStrategy) prepareCanaryUpdate(ctx context.Context, request *types
 }
 
 
-func (c *CanaryStrategy) cleanupCanary(ctx context.Context, namespace, serviceName, canaryDeployment string, status *storage.DeploymentStatus) {
+func (c *CanaryStrategy) cleanupCanary(ctx context.Context, namespace, serviceName, canaryDeployment string, status *storage.DeploymentStatus) error{
 	weights := map[string]int{"stable": 100, "canary": 0}
 	if err := c.istioMgr.UpdateVirtualServiceWeights(ctx, namespace, serviceName, weights); err != nil {
 		c.logger.Warn("failed to reset weights during cleanup", zap.Error(err))
+		return fmt.Errorf("failed to reset weights during cleanup %v", err)
 	}
 	if err := c.kubeClient.ScaleDeployment(ctx, namespace, canaryDeployment, 0); err != nil {
 		c.logger.Warn("failed to scale down canary during cleanup", zap.Error(err))
+		return fmt.Errorf("failed to reset weights during cleanup %v", err)
 	}
 	status.CanaryConfig.CanaryWeight = 0
+	
+	return nil
 }
 
 func (c *CanaryStrategy) promoteCanaryUpdate(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) error {
@@ -420,26 +414,32 @@ func (c *CanaryStrategy) promoteCanaryUpdate(ctx context.Context, request *types
 	status.CurrentPhase = "completed"
 	now := time.Now()
 	status.EndTime = &now
-	if err := c.storage.SaveDeployment(ctx, status); err != nil {
+	if err := c.storage.UpdateDeployment(ctx, status); err != nil {
 		c.updateStatusWithError(ctx, status, "failed", "save_after_promotion", err)
 		return fmt.Errorf("failed to save deployment status after promotion: %w", err)
 	}
 	return nil
 }
 
-func (c *CanaryStrategy) Rollback(ctx context.Context, namespace, deploymentName string) error {
-	status, err := c.storage.GetDeploymentByName(ctx, namespace, deploymentName)
+func (c *CanaryStrategy) Rollback(ctx context.Context, namespace, deploymentName string) (*storage.DeploymentStatus, error) {
+	status, err := c.storage.GetDeploymentByAppNamespace(ctx, namespace, deploymentName)
 	if err != nil {
-		return fmt.Errorf("failed to get deployment status: %w", err)
+		return nil, fmt.Errorf("failed to get deployment status: %w", err)
 	}
 
-	c.cleanupCanary(ctx, status.Namespace, status.ServiceConfig.Name, status.CanaryConfig.CanaryDeploymentName, status)
+	if err = c.cleanupCanary(ctx, status.Namespace, status.ServiceConfig.Name, status.CanaryConfig.CanaryDeploymentName, status); err != nil {
+		return nil, fmt.Errorf("An error occurred during rollback %v", err)
+	}
 
 	status.Status = "rolled back"
 	now := time.Now()
 	status.EndTime = &now
 	c.addEvent(status, "info", "rollback", "Rolled back to stable")
-	return c.storage.SaveDeployment(ctx, status)
+	if err =  c.storage.UpdateDeployment(ctx, status); err != nil {
+		return nil, fmt.Errorf("an issue occurred while saving application state %v", err)
+	}
+
+	return status, nil
 }
 
 func (c *CanaryStrategy) GetStatus(ctx context.Context, deploymentID string) (*storage.DeploymentStatus, error) {
@@ -462,7 +462,7 @@ func (c *CanaryStrategy) updateStatusWithError(ctx context.Context, status *stor
 	status.Error = err.Error()
 	status.EndTime = &[]time.Time{time.Now()}[0]
 	c.addEvent(status, "error", phase, err.Error())
-	c.storage.SaveDeployment(ctx, status)
+	c.storage.UpdateDeployment(ctx, status)
 }
 
 func (c *CanaryStrategy) CreateService(ctx context.Context, namespace, name, serviceName string, appPort int32,
@@ -622,9 +622,13 @@ func (c *CanaryStrategy) buildContainer(appName string, spec *types.ContainerSpe
 			{ContainerPort: spec.Port},
 		},
 	}
-	if healthConfig != nil {
-		container.LivenessProbe = types.NewKubeProbe(spec.LivenessProbe)
-		container.ReadinessProbe = types.NewKubeProbe(spec.ReadinessProbe)
+	if healthConfig != nil && healthConfig.Enabled {
+		if spec.LivenessProbe != nil{
+			container.LivenessProbe = types.NewKubeProbe(spec.LivenessProbe)
+		}
+		if spec.ReadinessProbe != nil{
+			container.ReadinessProbe = types.NewKubeProbe(spec.ReadinessProbe)
+		}
 	}
 	return container
 }

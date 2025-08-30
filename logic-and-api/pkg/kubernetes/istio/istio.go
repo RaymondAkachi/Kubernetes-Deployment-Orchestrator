@@ -6,21 +6,20 @@ import (
 	"fmt"
 
 	"github.com/RaymondAkachi/Kubernetes-Deployment-Orchestrator/logic-and-api/pkg/config"
+
 	"go.uber.org/zap"
+
 	networkingv1alpha3 "istio.io/api/networking/v1alpha3"
 
-	// Removed duplicate import for istioNetworkingV1alpha3
-	// istioNetworkingV1alpha3 "istio.io/client-go/pkg/apis/networking/v1alpha3"
 	istioClient "istio.io/client-go/pkg/clientset/versioned"
 
 	istio "istio.io/client-go/pkg/apis/networking/v1alpha3"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
+
 	"k8s.io/client-go/util/retry"
 
-	// "sigs.k8s.io/controller-runtime/pkg/client"
 	crClient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -81,20 +80,21 @@ func NewIstioManager(istioCfg config.IstioConfig, logger *zap.Logger, crclient c
 		if err != nil {
 			return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
 		}
-	} else {
-		configPath := istioCfg.ConfigPath
-		if configPath == "" {
-			configPath = clientcmd.RecommendedHomeFile
-		}
-		restConfig, err = clientcmd.BuildConfigFromFlags("", configPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build config from %s: %w", configPath, err)
-		}
 	}
+	// } else {
+	// 	configPath := istioCfg.ConfigPath
+	// 	if configPath == "" {
+	// 		configPath = clientcmd.RecommendedHomeFile
+	// 	}
+	// 	restConfig, err = clientcmd.BuildConfigFromFlags("", configPath)
+	// 	if err != nil {
+	// 		return nil, fmt.Errorf("failed to build config from %s: %w", configPath, err)
+	// 	}
+	// }
 
-	// Override API server and CA cert for Istio
-	restConfig.Host = istioCfg.APIServer
-	restConfig.CAFile = istioCfg.CACert
+	// // Override API server and CA cert for Istio
+	// restConfig.Host = istioCfg.APIServer
+	// restConfig.CAFile = istioCfg.CACert
 
 	iclient, err := istioClient.NewForConfig(restConfig)
 	if err != nil {
