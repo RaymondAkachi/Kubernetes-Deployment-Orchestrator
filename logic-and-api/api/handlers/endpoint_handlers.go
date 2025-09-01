@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
-	"time"
+
+	// "time"
 
 	"github.com/go-playground/validator/v10"
 
@@ -61,6 +62,7 @@ func (h *Handler) withAppLock(appKey string, fn func()) {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------
 
+// CreateDeployment handles deployment creation with concurrency limit
 func (h *Handler) CreateDeployment(c *gin.Context) {
 	var req types.DeploymentCreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -80,12 +82,28 @@ func (h *Handler) CreateDeployment(c *gin.Context) {
 	}
 
 	appKey := fmt.Sprintf("%s:%s", req.Namespace, req.Name)
-	h.withAppLock(appKey, func() {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
-		defer cancel()
 
+	// Acquire semaphore with timeout
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.cfg.Orchestrator.DeploymentTimeout)
+	defer cancel()
+
+	select {
+	case h.createSemaphore <- struct{}{}:
+		defer func() { <-h.createSemaphore }()
+	case <-ctx.Done():
+		h.logEvent(h.logger, "create_deployment", req.Name, "timeout", ctx.Err(),
+			zap.String("namespace", req.Namespace),
+		)
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many concurrent deployments"})
+		return
+	}
+
+	// Apply universal lock
+	h.withAppLock(appKey, func() {
 		if !h.orchestrator.IsLeader() {
-			h.logger.Warn("not leader, cannot process deployment")
+			h.logEvent(h.logger, "create_deployment", req.Name, "failure", fmt.Errorf("not leader"),
+				zap.String("namespace", req.Namespace),
+			)
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Not the leader instance"})
 			return
 		}
@@ -129,7 +147,7 @@ func (h *Handler) UpdateDeployment(c *gin.Context) {
 
 	appKey := fmt.Sprintf("%s:%s", req.Namespace, req.Name)
 	h.withAppLock(appKey, func() {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(c.Request.Context(),h.cfg.Orchestrator.DeploymentTimeout)
 		defer cancel()
 
 		if !h.orchestrator.IsLeader() {
@@ -177,7 +195,7 @@ func (h *Handler) Rollback(c *gin.Context) {
 
 	appKey := fmt.Sprintf("%s:%s", req.Namespace, req.Name)
 	h.withAppLock(appKey, func() {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(c.Request.Context(),h.cfg.Orchestrator.DeploymentTimeout)
 		defer cancel()
 
 		if !h.orchestrator.IsLeader() {
@@ -203,6 +221,39 @@ func (h *Handler) Rollback(c *gin.Context) {
 	})
 }
 
+func (h *Handler) ListDeployments(c *gin.Context) {
+	var req types.ListDeploymentsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.logEvent(h.logger, "api_validation", "list_deployments", "failure", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Validate schema
+	if err := h.validateStruct(&req); err != nil {
+		h.logEvent(h.logger, "api_validation", "list_deployments", "failure", err,
+			zap.String("namespace", req.Namespace),
+			// zap.String("name", req.Name),
+		)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	deps, err := h.orchestrator.ListDeploymentsFiltered(c, &req)
+	if err != nil {
+			h.logEvent(h.logger, "list_deployments", "", "failure", err,
+				zap.String("namespace", req.Namespace),
+			)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	
+	h.logEvent(h.logger, "list_deployments", "", "success", nil,
+			zap.String("namespace", req.Namespace),
+			// zap.String("status", status.Status),
+		)
+		c.JSON(http.StatusOK, deps)
+}
 // ------------------------------------------------------------------------------------------------------------------------------------------
 
 // handleReadiness checks if the pod is the leader for the readiness probe.
@@ -236,11 +287,11 @@ func(h  *Handler) GetDeploymentStatus( c *gin.Context) {
 
 	appKey := fmt.Sprintf("%s:%s", req.Namespace, req.Name)
 	h.withAppLock(appKey, func() {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(c.Request.Context(), h.cfg.Kubernetes.Timeout)
 		defer cancel()
 
 		if !h.orchestrator.IsLeader() {
-			h.logger.Warn("not leader, cannot process rollback")
+			h.logger.Warn("not leader, cannot get deploymet status")
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Not the leader instance"})
 			return
 		}

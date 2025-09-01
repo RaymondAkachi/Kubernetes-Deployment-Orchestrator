@@ -21,12 +21,7 @@ const UserKey contextKey = "user"
 func Auth(clientset *kubernetes.Clientset, cfg *config.Config, logger *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// if !cfg.Security.Auth.Enabled || cfg.Security.Auth.Type != "k8s_token" {
-			if cfg.Security.Auth.Type != "k8s_token" {
-				logger.Warn("Authentication is disabled or not using k8s_token")
-				next.ServeHTTP(w, r)
-				return
-			}
+			// if !cfg.Security.Auth.Enabled || cfg.Security.Auth.Type != "k8s_token" {}
 
 			authHeader := r.Header.Get("Authorization")
 			if !strings.HasPrefix(authHeader, "Bearer ") {

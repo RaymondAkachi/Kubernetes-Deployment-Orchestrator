@@ -428,10 +428,10 @@ func (c *CanaryStrategy) Rollback(ctx context.Context, namespace, deploymentName
 	}
 
 	if err = c.cleanupCanary(ctx, status.Namespace, status.ServiceConfig.Name, status.CanaryConfig.CanaryDeploymentName, status); err != nil {
-		return nil, fmt.Errorf("An error occurred during rollback %v", err)
+		return nil, fmt.Errorf("an error occurred during rollback %v", err)
 	}
 
-	status.Status = "rolled back"
+	status.Status = "rolled-back"
 	now := time.Now()
 	status.EndTime = &now
 	c.addEvent(status, "info", "rollback", "Rolled back to stable")

@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/RaymondAkachi/Kubernetes-Deployment-Orchestrator/logic-and-api/pkg/config"
+	// "github.com/RaymondAkachi/Kubernetes-Deployment-Orchestrator/logic-and-api/pkg/config"
 
 	"go.uber.org/zap"
 
@@ -62,25 +62,27 @@ type Route struct {
 type istioManagerImpl struct {
 	client *istioClient.Clientset
 	logger *zap.Logger
-	config config.IstioConfig
+	// config config.IstioConfig
 	crClient crClient.Client // Controller-runtime client for CRD operations
 }
 
 // NewIstioManager creates a new IstioManager instance
-func NewIstioManager(istioCfg config.IstioConfig, logger *zap.Logger, crclient crClient.Client) (IstioManager, error) {
-	if !istioCfg.Enabled {
-		return nil, fmt.Errorf("istio is disabled in configuration")
-	}
+// func NewIstioManager(istioCfg config.IstioConfig, logger *zap.Logger, crclient crClient.Client) (IstioManager, error) {
+func NewIstioManager(logger *zap.Logger, crclient crClient.Client) (IstioManager, error) {
+	// if !istioCfg.Enabled {
+	// 	return nil, fmt.Errorf("istio is disabled in configuration")
+	// }
 
 	var restConfig *rest.Config
 	var err error
 
-	if istioCfg.InCluster {
-		restConfig, err = rest.InClusterConfig()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
-		}
-	}
+	// if istioCfg.InCluster {
+	// 	restConfig, err = rest.InClusterConfig()
+	// 	if err != nil {
+	// 		return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
+	// 	}
+	// }
+
 	// } else {
 	// 	configPath := istioCfg.ConfigPath
 	// 	if configPath == "" {
@@ -105,15 +107,15 @@ func NewIstioManager(istioCfg config.IstioConfig, logger *zap.Logger, crclient c
 		crClient: crclient,
 		client: iclient,
 		logger: logger,
-		config: istioCfg,
+		// config: istioCfg,
 	}, nil
 }
 
 // CreateDestinationRule creates a new DestinationRule with the specified subsets
 func (m *istioManagerImpl) CreateDestinationRule(ctx context.Context, namespace, serviceName string, subsets []Subset) error {
-	if !m.config.Enabled {
-		return fmt.Errorf("istio is disabled")
-	}
+	// if !m.config.Enabled {
+	// 	return fmt.Errorf("istio is disabled")
+	// }
 
 	dr := &istio.DestinationRule{
 		ObjectMeta: metav1.ObjectMeta{
@@ -141,9 +143,9 @@ func (m *istioManagerImpl) CreateDestinationRule(ctx context.Context, namespace,
 
 // CreateVirtualService creates a new VirtualService with the specified routes
 func (m *istioManagerImpl) CreateVirtualService(ctx context.Context, namespace, serviceName string, hosts []string, routes []Route) error {
-	if !m.config.Enabled {
-		return fmt.Errorf("istio is disabled")
-	}
+	// if !m.config.Enabled {
+	// 	return fmt.Errorf("istio is disabled")
+	// }
 
 	vs := &istio.VirtualService{
 		ObjectMeta: metav1.ObjectMeta{
@@ -181,9 +183,9 @@ func (m *istioManagerImpl) CreateVirtualService(ctx context.Context, namespace, 
 
 // UpdateVirtualServiceWeights updates the weights of an existing VirtualService
 func (m *istioManagerImpl) UpdateVirtualServiceWeights(ctx context.Context, namespace, serviceName string, weights map[string]int) error {
-	if !m.config.Enabled {
-		return fmt.Errorf("istio is disabled")
-	}
+	// if !m.config.Enabled {
+	// 	return fmt.Errorf("istio is disabled")
+	// }
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		vs, err := m.client.NetworkingV1alpha3().VirtualServices(namespace).Get(ctx, serviceName, metav1.GetOptions{})
@@ -314,9 +316,9 @@ func toIstioRoutes(routes []Route) []*networkingv1alpha3.HTTPRouteDestination {
 }
 
 func(im *istioManagerImpl) DeleteVirtualService(ctx context.Context, namespace, serviceName string) error {
-	if !im.config.Enabled {
-		return fmt.Errorf("istio is disabled")
-	}
+	// if !im.config.Enabled {
+	// 	return fmt.Errorf("istio is disabled")
+	// }
 
 	err := im.client.NetworkingV1alpha3().VirtualServices(namespace).Delete(ctx, serviceName, metav1.DeleteOptions{})
 	if err != nil {
@@ -339,9 +341,9 @@ func(im *istioManagerImpl) DeleteVirtualService(ctx context.Context, namespace, 
 }
 
 func(im *istioManagerImpl) DeleteDestinationRule(ctx context.Context, namespace, serviceName string) error {
-	if !im.config.Enabled {
-		return fmt.Errorf("istio is disabled")
-	}
+	// if !im.config.Enabled {
+	// 	return fmt.Errorf("istio is disabled")
+	// }
 
 	err := im.client.NetworkingV1alpha3().DestinationRules(namespace).Delete(ctx, serviceName, metav1.DeleteOptions{})
 	if err != nil {

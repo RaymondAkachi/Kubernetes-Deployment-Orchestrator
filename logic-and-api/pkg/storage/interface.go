@@ -4,6 +4,8 @@ package storage
 import (
 	"context"
 	"errors"
+
+    "github.com/RaymondAkachi/Kubernetes-Deployment-Orchestrator/logic-and-api/pkg/types"
 )
 
 var ErrNotFound = errors.New("deployment not found")
@@ -32,4 +34,5 @@ type Interface interface {
     GetDeploymentByAppNamespace(ctx context.Context, appName, namespace string) (*DeploymentStatus, error) 
     DeleteDeployment(ctx context.Context, id string) error
     ListDeployments(ctx context.Context, namespace string) ([]*DeploymentStatus, error)
+    ListDeploymentsFiltered(ctx context.Context, req *types.ListDeploymentsRequest) ([]*DeploymentStatus, error) 
 }

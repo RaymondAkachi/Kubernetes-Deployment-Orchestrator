@@ -385,24 +385,24 @@ func (bg *BlueGreenStrategy) GetStatus(ctx context.Context, deploymentID string)
 	return bg.storage.GetDeployment(ctx, deploymentID)
 }
 
-func (bg *BlueGreenStrategy) monitorDeployment(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) error {
-	monitorDuration := 2 * time.Minute
-	interval := 10 * time.Second
-	start := time.Now()
-	for {
-		if request.NewHealthCheckConfig != nil && request.NewHealthCheckConfig.Enabled {
-			if _, err := bg.healthMonitor.CheckDeploymentHealth(ctx, request.Namespace, request.Name, request.NewHealthCheckConfig); err != nil {
-				return fmt.Errorf("monitoring health check failed: %w", err)
-			}
-		}
-		if time.Since(start) > monitorDuration {
-			break
-		}
-		time.Sleep(interval)
-	}
-	bg.addEvent(status, "info", "monitoring", "Deployment remained healthy during monitoring")
-	return nil
-}
+// func (bg *BlueGreenStrategy) monitorDeployment(ctx context.Context, request *types.DeploymentUpdateRequest, status *storage.DeploymentStatus) error {
+// 	monitorDuration := 2 * time.Minute
+// 	interval := 10 * time.Second
+// 	start := time.Now()
+// 	for {
+// 		if request.NewHealthCheckConfig != nil && request.NewHealthCheckConfig.Enabled {
+// 			if _, err := bg.healthMonitor.CheckDeploymentHealth(ctx, request.Namespace, request.Name, request.NewHealthCheckConfig); err != nil {
+// 				return fmt.Errorf("monitoring health check failed: %w", err)
+// 			}
+// 		}
+// 		if time.Since(start) > monitorDuration {
+// 			break
+// 		}
+// 		time.Sleep(interval)
+// 	}
+// 	bg.addEvent(status, "info", "monitoring", "Deployment remained healthy during monitoring")
+// 	return nil
+// }
 
 func (b *BlueGreenStrategy) CreateService(ctx context.Context, namespace, name, serviceName string, appPort int32,
 	serviceConf *types.ServiceConfig, labels map[string]string) error {

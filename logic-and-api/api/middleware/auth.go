@@ -30,13 +30,13 @@ type ResourcePermission struct {
 // Auth validates Kubernetes tokens using TokenReview
 func Auth(clientset *kubernetes.Clientset, cfg *config.Config, logger *zap.Logger, auditLogger *logging.AuthLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if cfg.Security.Auth.Type != "k8s_token" {
-			logger.Warn("Authentication disabled or not using k8s_token")
-			auditLogger.LogAuthenticationAttempt("anonymous", "access", map[string]string{"path": c.Request.URL.Path})
-			auditLogger.LogAuthenticationSuccess("anonymous", "access", map[string]string{"path": c.Request.URL.Path})
-			c.Next()
-			return
-		}
+		// if cfg.Security.Auth.Type != "k8s_token" {
+		// 	logger.Warn("Authentication disabled or not using k8s_token")
+		// 	auditLogger.LogAuthenticationAttempt("anonymous", "access", map[string]string{"path": c.Request.URL.Path})
+		// 	auditLogger.LogAuthenticationSuccess("anonymous", "access", map[string]string{"path": c.Request.URL.Path})
+		// 	c.Next()
+		// 	return
+		// }
 
 		authHeader := c.GetHeader("Authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {

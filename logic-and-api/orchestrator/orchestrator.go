@@ -93,14 +93,15 @@ func NewOrchestrator(cfg *Config, logger *zap.Logger) (*Orchestrator, error) {
 	crClient := mgr.GetClient()
 
 	// Initialize Istio manager
-	istioMgr, err := istio.NewIstioManager(config.Istio, logger, crClient)
+	// istioMgr, err := istio.NewIstioManager(config.Istio, logger, crClient)
+	istioMgr, err := istio.NewIstioManager(logger, crClient)
 	if err != nil {
 		logger.Fatal("failed to initialize Istio manager", zap.Error(err))
 	}
 
 	orch := &Orchestrator{
 		kubeClient:    clientset,
-		storage:       cfg.Storage,
+		storage:       newMongoClient,
 		istioMgr:      &istioMgr,
 		healthMonitor: health,
 		Logger:        logger,
@@ -279,4 +280,20 @@ func (o *Orchestrator) GetDeploymentStatus(ctx context.Context, namespace, name 
     )
 
     return status, nil
+}
+
+
+func(o *Orchestrator) ListDeploymentsFiltered(ctx context.Context, req *types.ListDeploymentsRequest) ([]*storage.DeploymentStatus, error) {
+	deps, err := o.storage.ListDeploymentsFiltered(ctx, req)
+	if err != nil {
+		o.Logger.Info("list_deployments_failed",
+            zap.String("action", "get_deployment_status"),
+            // zap.String("subject", name),
+            zap.String("result", "failure"),
+            // zap.String("namespace", namespace),
+            zap.Error(err),
+        )
+        return nil, err
+	}
+	return deps, nil
 }

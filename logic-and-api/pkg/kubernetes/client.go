@@ -4,7 +4,8 @@ package kubernetes
 import (
 	"context"
 	"fmt"
-	"os"
+
+	// "os"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,8 @@ import (
 	// "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
+
+	// "k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/retry"
 
 	"github.com/RaymondAkachi/Kubernetes-Deployment-Orchestrator/logic-and-api/pkg/config"
@@ -33,7 +35,7 @@ type Client struct {
     config         *rest.Config
     logger         *zap.Logger
     defaultTimeout time.Duration
-    retryCount     int
+    // retryCount     int
     mu             sync.RWMutex
 }
 
@@ -49,21 +51,21 @@ func NewClient(cfg *config.Config, logger *zap.Logger) (*Client, error) {
     var k8sConfig *rest.Config
     var err error
 
-    if cfg.Kubernetes.InCluster {
-        k8sConfig, err = rest.InClusterConfig()
-        if err != nil {
-            return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
-        }
-    } else {
-        configPath := os.Getenv("CONFIG_PATH")
-        if configPath == "" {
-            configPath = clientcmd.RecommendedHomeFile
-        }
-        k8sConfig, err = clientcmd.BuildConfigFromFlags("", configPath)
-        if err != nil {
-            return nil, fmt.Errorf("failed to build config from flags: %w", err)
-        }
+    // if cfg.Kubernetes.InCluster {
+    k8sConfig, err = rest.InClusterConfig()
+    if err != nil {
+        return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
     }
+    // } else {
+    //     configPath := os.Getenv("CONFIG_PATH")
+    //     if configPath == "" {
+    //         configPath = clientcmd.RecommendedHomeFile
+    //     }
+    //     k8sConfig, err = clientcmd.BuildConfigFromFlags("", configPath)
+    //     if err != nil {
+    //         return nil, fmt.Errorf("failed to build config from flags: %w", err)
+    //     }
+    // }
 
     // Configure rate limiting
     k8sConfig.QPS = cfg.Kubernetes.RateLimit.QPS
@@ -79,7 +81,7 @@ func NewClient(cfg *config.Config, logger *zap.Logger) (*Client, error) {
         config:         k8sConfig,
         logger:         logger,
         defaultTimeout: cfg.Kubernetes.Timeout,
-        retryCount:     cfg.Kubernetes.RetryCount,
+        // retryCount:     cfg.Kubernetes.RetryCount,
     }, nil
 }
 

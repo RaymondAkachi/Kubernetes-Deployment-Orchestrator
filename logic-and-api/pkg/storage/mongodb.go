@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/RaymondAkachi/Kubernetes-Deployment-Orchestrator/logic-and-api/pkg/config"
+    "github.com/RaymondAkachi/Kubernetes-Deployment-Orchestrator/logic-and-api/pkg/types"
+
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -175,5 +177,76 @@ func (m *MongoDBClient) ListDeployments(ctx context.Context, namespace string) (
         m.logger.Error("Cursor error", zap.Error(err))
         return nil, fmt.Errorf("cursor error: %w", err)
     }
+    return deployments, nil
+}
+
+// ListDeploymentsFiltered retrieves deployments based on the specified filter criteria
+func (m *MongoDBClient) ListDeploymentsFiltered(ctx context.Context, req *types.ListDeploymentsRequest) ([]*DeploymentStatus, error) {
+    // Build the filter based on the request parameters
+    filter := bson.M{}
+    
+    // Add namespace filter if specified
+    if req.Namespace != "" {
+        filter["namespace"] = req.Namespace
+    }
+    
+    // Add status filter if specified
+    if req.Status != "" {
+        filter["status"] = req.Status
+    }
+    
+    // Add strategy filter if specified
+    if req.Strategy != "" {
+        filter["strategy"] = req.Strategy
+    }
+    
+    // Set up find options
+    opts := options.Find()
+    
+    // Add limit if specified
+    if req.Limit > 0 {
+        opts.SetLimit(int64(req.Limit))
+    }
+    
+    // Optional: Add sorting by start_time (most recent first)
+    opts.SetSort(bson.D{{Key: "start_time", Value: -1}})
+    
+    m.logger.Info("Searching deployments with filters", 
+        zap.String("namespace", req.Namespace),
+        zap.String("status", req.Status),
+        zap.String("strategy", req.Strategy),
+        zap.Int("limit", req.Limit))
+    
+    // Execute the query
+    cursor, err := m.collection.Find(ctx, filter, opts)
+    if err != nil {
+        m.logger.Error("Failed to execute filtered deployment search", 
+            zap.Error(err),
+            zap.Any("filter", filter))
+        return nil, fmt.Errorf("failed to execute filtered deployment search: %w", err)
+    }
+    defer cursor.Close(ctx)
+    
+    // Decode results
+    var deployments []*DeploymentStatus
+    for cursor.Next(ctx) {
+        var dep DeploymentStatus
+        if err := cursor.Decode(&dep); err != nil {
+            m.logger.Error("Failed to decode deployment during filtered search", zap.Error(err))
+            continue // Skip this document and continue with others
+        }
+        deployments = append(deployments, &dep)
+    }
+    
+    // Check for cursor errors
+    if err := cursor.Err(); err != nil {
+        m.logger.Error("Cursor error during filtered search", zap.Error(err))
+        return nil, fmt.Errorf("cursor error during filtered search: %w", err)
+    }
+    
+    m.logger.Info("Successfully retrieved filtered deployments", 
+        zap.Int("count", len(deployments)),
+        zap.Any("filter_criteria", filter))
+    
     return deployments, nil
 }

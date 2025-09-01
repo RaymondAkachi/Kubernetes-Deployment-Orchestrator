@@ -22,16 +22,16 @@ type Config struct {
     Logging      LoggingConfig      `mapstructure:"logging" validate:"required"`
     Orchestrator OrchestratorConfig `mapstructure:"orchestrator" validate:"required"`
     Storage      StorageConfig      `mapstructure:"storage" validate:"required"`
-    Istio        IstioConfig        `mapstructure:"istio" validate:"required"`
+    // Istio        IstioConfig        `mapstructure:"istio" validate:"required"`
     Prometheus   PrometheusConfig   `mapstructure:"prometheus" validate:"required"`
 }
 
 // KubernetesConfig defines Kubernetes client settings
 type KubernetesConfig struct {
-    InCluster  bool          `mapstructure:"in_cluster" validate:"required,boolean"`
+    // InCluster  bool          `mapstructure:"in_cluster" validate:"required,boolean"`
     Timeout    time.Duration `mapstructure:"timeout" validate:"required,min=1s"`
     RateLimit  RateLimit     `mapstructure:"rate_limit" validate:"required"`
-    RetryCount int           `mapstructure:"retry_count" validate:"required,min=1"`
+    // RetryCount int           `mapstructure:"retry_count" validate:"required,min=1"`
 }
 
 // RateLimit defines Kubernetes API rate limiting
@@ -43,7 +43,7 @@ type RateLimit struct {
 // SecurityConfig defines security settings
 type SecurityConfig struct {
     Port      string          `mapstructure:"port" validate:"required"`
-    Auth      AuthConfig      `mapstructure:"auth" validate:"required"`
+    // Auth      AuthConfig      `mapstructure:"auth" validate:"required"`
     RateLimit RateLimitConfig `mapstructure:"rate_limit" validate:"required"`
     TLS       TLSConfig       `mapstructure:"tls" validate:"required"`
 }
@@ -53,19 +53,20 @@ type TLSConfig struct {
     Enabled  bool   `mapstructure:"enabled" validate:"boolean"`
     CertFile string `mapstructure:"cert_file" validate:"required_if=Enabled true"`
     KeyFile  string `mapstructure:"key_file" validate:"required_if=Enabled true"`
+    CAFile   string `mapstructure:"ca_file" validate:"required_if=Enabled true"`
 }
 
 // AuthConfig specifies authentication settings
-type AuthConfig struct {
-    // We enforce k8s_token as the only type for in-cluster deployment
-    Type string `mapstructure:"type" validate:"required,oneof=k8s_token"`
-}
+// type AuthConfig struct {
+//     // We enforce k8s_token as the only type for in-cluster deployment
+//     Type string `mapstructure:"type" validate:"required,oneof=k8s_token"`
+// }
 
 // RateLimitConfig defines HTTP request rate limiting
 type RateLimitConfig struct {
     Enabled           bool `mapstructure:"enabled" validate:"boolean"`
     RequestsPerSecond int  `mapstructure:"requests_per_second" validate:"required_if=Enabled true,min=1"`
-    Burst             int  `mapstructure:"burst" validate:"required_if=Enabled true,min=1"`
+    // Burst             int  `mapstructure:"burst" validate:"required_if=Enabled true,min=1"`
 }
 
 // LoggingConfig defines logging settings
@@ -85,7 +86,7 @@ type AuditConfig struct {
 type OrchestratorConfig struct {
     MaxConcurrentDeployments int           `mapstructure:"max_concurrent_deployments" validate:"required,min=1"`
     DeploymentTimeout        time.Duration `mapstructure:"deployment_timeout" validate:"required,min=1m"`
-    DefaultNamespace         string        `mapstructure:"default_namespace" validate:"required"`
+    // DefaultNamespace         string        `mapstructure:"default_namespace" validate:"required"`
 }
 
 // StorageConfig defines storage settings
@@ -101,10 +102,10 @@ type MongoDBConfig struct {
 }
 
 // IstioConfig defines Istio client settings
-type IstioConfig struct {
-    Enabled   bool `mapstructure:"enabled" validate:"boolean"`
-    InCluster bool `mapstructure:"in_cluster" validate:"boolean"`
-}
+// type IstioConfig struct {
+//     Enabled   bool `mapstructure:"enabled" validate:"boolean"`
+//     InCluster bool `mapstructure:"in_cluster" validate:"boolean"`
+// }
 
 // PrometheusConfig defines Prometheus client settings
 type PrometheusConfig struct {

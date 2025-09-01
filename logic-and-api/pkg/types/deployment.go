@@ -92,7 +92,7 @@ type ListDeploymentsRequest struct {
 	Status    string `json:"status,omitempty"`
 	Strategy  string `json:"strategy,omitempty"`
 	Limit     int    `json:"limit,omitempty" validate:"min=0"`
-	Offset    int    `json:"offset,omitempty" validate:"min=0"`
+	// Offset    int    `json:"offset,omitempty" validate:"min=0"`
 }
 
 // ListDeploymentsResponse represents the response for listing deployments
