@@ -7,24 +7,25 @@ metadata:
 data:
   config.yaml: |
     kubernetes:
-      in_cluster: true
+      # in_cluster: true ----\/
       timeout: 10s
       rate_limit:
         qps: 10
         burst: 20
-      retry_count: 3
+      # retry_count: 3 -----\/
     security:
       port: 8080
-      auth:
-        type: k8s_token
+      # auth: -------------------\/
+      #   type: k8s_token --------\/
       rate_limit:
         enabled: true
         requests_per_second: 10
-        burst: 20
+        # burst: 20 --------\/
       tls:
         enabled: true
-        cert_file: var/tls/orchestrator/file.cert
-        key_file: var/tls/orchestrator/key.pem
+        cert_file: /etc/orchestrator/tls/cert.pem
+        ca_cert: /etc/orchestrator/tls/ca.crt
+        key_file: /etc/orchestrator/tls/key.pem
     logging:
       level: info
       path: /var/log/orchestrator/orchestrator.log
@@ -32,14 +33,14 @@ data:
     orchestrator:
       max_concurrent_deployments: 5
       deployment_timeout: 5m
-      default_namespace: default
+      # default_namespace: default ------ \/
     storage:
       mongodb:
         uri: mongodb://mongodb-service.default.svc.cluster.local:27017
         database: orchestrator
         collection: deployments
     istio:
-      enabled: true
-      in_cluster: true
+      # enabled: true -------\/
+      # in_cluster: true ---------\/
     prometheus:
       url: http://prometheus-service.monitoring.svc.cluster.local:9090

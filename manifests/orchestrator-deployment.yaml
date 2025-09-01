@@ -26,8 +26,9 @@ data:
         burst: 20
       tls:
        enabled: true
-       certfile: var/tls/orchestrator/file.cert
-       keyfile: vat/tls/orchestrator/key.pem
+       cert_file: /etc/orchestrator/tls/cert.pem
+       ca_cert: /etc/orchestrator/tls/ca.crt
+       key_file: /etc/orchestrator/tls/key.pem
     logging:
       level: info
       audit:
@@ -55,7 +56,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: orchestrator
-  namespace: orchestrator-system
+  namespace: default
 ---
 # Secret for TLS certificates
 apiVersion: v1
@@ -65,15 +66,15 @@ metadata:
   namespace: default
 type: kubernetes.io/tls
 data:
-  cert.pem: <base64-encoded-cert>
-  key.pem: <base64-encoded-key>
+  ca.crt: <paste_your_base64_encoded_ca_certificate_here>
+  cert.pem: <paste_your_base64_encoded_certificate_here>
+  key.pem: <paste_your_base64_encoded_key_here>
 ---
 # PersistentVolume for log storage
 apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: orchestrator-logs-pv
-  namespace: default
 spec:
   capacity:
     storage: 1Gi
@@ -156,6 +157,8 @@ kind: Service
 metadata:
   name: orchestrator-service
   namespace: default
+  labels:
+    app: orchestrator 
 spec:
   selector:
     app: orchestrator
@@ -179,7 +182,7 @@ spec:
   endpoints:
   - port: metrics
     path: "/metrics"
-    interval: 15s
+    interval: 30s
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -205,15 +208,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: orchestrator-role
+  name: orchestrator-binding # Renamed for clarity
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: orchestrator
+  name: orchestrator-role # <-- FIX: Must match the ClusterRole's name
 subjects:
 - kind: ServiceAccount
   name: orchestrator
-  namespace: orchestrator-system
+  namespace: default # <-- FIX: Must match the Deployment's namespace
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
