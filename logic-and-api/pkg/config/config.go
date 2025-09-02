@@ -114,18 +114,39 @@ type PrometheusConfig struct {
 
 // LoadConfig reads configuration from the specified path
 func LoadConfig(path string) (*Config, error) {
-    viper.SetConfigFile(path)
-    if err := viper.ReadInConfig(); err != nil {
-        return nil, fmt.Errorf("failed to read config file: %w", err)
+    // Validate config file exists and is readable
+    if err := validateConfigFile(path); err != nil {
+        return nil, fmt.Errorf("config file validation failed: %w", err)
     }
 
+    // Configure viper with strict settings
+    viper.SetConfigFile(path)
+    viper.SetConfigType("yaml")
+    
+    // Read configuration
+    if err := viper.ReadInConfig(); err != nil {
+        return nil, fmt.Errorf("failed to read config file '%s': %w", path, err)
+    }
+
+    // Unmarshal with strict validation
     var cfg Config
     if err := viper.Unmarshal(&cfg); err != nil {
-        return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+        return nil, fmt.Errorf("failed to unmarshal config from '%s': %w", path, err)
     }
 
-    if err := validate.Struct(&cfg); err != nil {
+    // Perform comprehensive validation
+    if err := performStrictValidation(&cfg); err != nil {
         return nil, fmt.Errorf("config validation failed: %w", err)
+    }
+
+    // Perform business logic validation
+    if err := performBusinessLogicValidation(&cfg); err != nil {
+        return nil, fmt.Errorf("business logic validation failed: %w", err)
+    }
+
+    // Perform security validation
+    if err := performSecurityValidation(&cfg); err != nil {
+        return nil, fmt.Errorf("security validation failed: %w", err)
     }
 
     return &cfg, nil

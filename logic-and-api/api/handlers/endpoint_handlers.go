@@ -98,8 +98,14 @@ func (h *Handler) CreateDeployment(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusOK, gin.H{
+	"message": "App creation initiated",
+	"job_id":  map[string]string{"name": req.Name, "namespace": req.Namespace},
+	"status":  "pending",
+	})
+
 	// Apply universal lock
-	h.withAppLock(appKey, func() {
+	go h.withAppLock(appKey, func() {
 		if !h.orchestrator.IsLeader() {
 			h.logEvent(h.logger, "create_deployment", req.Name, "failure", fmt.Errorf("not leader"),
 				zap.String("namespace", req.Namespace),
@@ -121,7 +127,6 @@ func (h *Handler) CreateDeployment(c *gin.Context) {
 			zap.String("namespace", req.Namespace),
 			zap.String("status", status.Status),
 		)
-		c.JSON(http.StatusCreated, status)
 	})
 }
 
@@ -145,8 +150,14 @@ func (h *Handler) UpdateDeployment(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusOK, gin.H{
+		"message": "App update initiated",
+		"job_id":  map[string]string{"name": req.Name, "namespace": req.Namespace},
+		"status":  "pending",
+	})
+
 	appKey := fmt.Sprintf("%s:%s", req.Namespace, req.Name)
-	h.withAppLock(appKey, func() {
+	go h.withAppLock(appKey, func() {
 		ctx, cancel := context.WithTimeout(c.Request.Context(),h.cfg.Orchestrator.DeploymentTimeout)
 		defer cancel()
 
@@ -169,7 +180,6 @@ func (h *Handler) UpdateDeployment(c *gin.Context) {
 			zap.String("namespace", req.Namespace),
 			zap.String("status", status.Status),
 		)
-		c.JSON(http.StatusOK, status)
 	})
 }
 
@@ -193,8 +203,14 @@ func (h *Handler) Rollback(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusOK, gin.H{
+		"message": "App rollback initiated",
+		"job_id":  map[string]string{"name": req.Name, "namespace": req.Namespace},
+		"status":  "pending",
+	})
+
 	appKey := fmt.Sprintf("%s:%s", req.Namespace, req.Name)
-	h.withAppLock(appKey, func() {
+	go h.withAppLock(appKey, func() {
 		ctx, cancel := context.WithTimeout(c.Request.Context(),h.cfg.Orchestrator.DeploymentTimeout)
 		defer cancel()
 
@@ -216,8 +232,7 @@ func (h *Handler) Rollback(c *gin.Context) {
 		h.logEvent(h.logger, "rollback_deployment", req.Name, "success", nil,
 			zap.String("namespace", req.Namespace),
 			zap.String("status", status.Status),
-		)
-		c.JSON(http.StatusOK, status)
+		)	
 	})
 }
 
